@@ -25,17 +25,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build
-
-      - name: List files for debugging
-        run: ls -R
+          pip install build twine
 
       - name: Build package
         run: python -m build
 
       - name: Publish package to GitHub Packages
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          user: __token__
-          password: ${{ secrets.GITHUB_TOKEN }}
-          repository_url: https://pypi.pkg.github.com/bnlnpps
+        run: twine upload --repository-url https://pypi.pkg.github.com/bnlnpps dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
