@@ -27,10 +27,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install build
 
+      - name: List files for debugging
+        run: ls -R
+
       - name: Build package
-        run: |
-          cd swf-common-lib
-          python -m build
+        run: python -m build
 
       - name: Publish package to GitHub Packages
         uses: pypa/gh-action-pypi-publish@release/v1
