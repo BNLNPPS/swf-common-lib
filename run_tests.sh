@@ -1,26 +1,23 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-# This script runs tests for swf-common-lib.
-# It assumes that the unified project environment has already been set up and
-# activated by the master setup.sh script in the swf-testbed directory.
-# For running all project tests, use the master script in swf-testbed/run_tests.sh
+# Get the directory of the script
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-# Attempt to activate the environment if it's not already active.
-if [ -z "$VIRTUAL_ENV" ]; then
-    echo "No active virtual environment. Attempting to source setup_env.sh..."
-    # Assuming this script is in swf-common-lib and setup_env.sh is in the sibling swf-testbed dir
-    SETUP_ENV_PATH="$(dirname "$0")/../swf-testbed/setup_env.sh"
-    if [ -f "$SETUP_ENV_PATH" ]; then
-        source "$SETUP_ENV_PATH"
-    else
-        echo "ERROR: Could not find setup_env.sh at $SETUP_ENV_PATH"
-        echo "Please run the master setup script from the swf-testbed directory: ./setup.sh"
-        exit 1
-    fi
+# Define the virtual environment directory
+# Assumes a venv is created in the swf-common-lib directory
+VENV_DIR="$SCRIPT_DIR/venv"
+
+# Check if the virtual environment exists
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Virtual environment not found at $VENV_DIR."
+    echo "Please run the setup procedure to create it."
+    exit 1
 fi
 
-if [ "$1" != "--no-header" ]; then
-    echo "--- Running tests for swf-common-lib ---"
-fi
-pytest
+# Activate the virtual environment and run tests
+echo "Activating Python environment from $VENV_DIR"
+source "$VENV_DIR/bin/activate"
+
+echo "Running pytest for swf-common-lib..."
+python -m pytest
