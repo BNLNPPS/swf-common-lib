@@ -3,21 +3,20 @@ set -e
 
 # Get the directory of the script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-
-# Define the virtual environment directory
-# Assumes a venv is created in the swf-common-lib directory
 VENV_DIR="$SCRIPT_DIR/venv"
 
-# Check if the virtual environment exists
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Virtual environment not found at $VENV_DIR."
-    echo "Please run the setup procedure to create it."
+# If a virtual environment is already active, use it
+if [ -n "$VIRTUAL_ENV" ]; then
+    echo "Using already active Python environment: $VIRTUAL_ENV"
+# Otherwise, try to activate the local venv if it exists
+elif [ -d "$VENV_DIR" ]; then
+    echo "Activating Python environment from $VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+else
+    echo "Error: No active Python environment found and no local venv at $VENV_DIR."
+    echo "This script must be run with an active Python environment."
     exit 1
 fi
-
-# Activate the virtual environment and run tests
-echo "Activating Python environment from $VENV_DIR"
-source "$VENV_DIR/bin/activate"
 
 echo "Running pytest for swf-common-lib..."
 python -m pytest
