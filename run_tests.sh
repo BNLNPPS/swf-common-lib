@@ -20,5 +20,7 @@ if [ -z "$VIRTUAL_ENV" ]; then
     fi
 fi
 
-echo "--- Running tests for swf-common-lib ---"
+if [ "$1" != "--no-header" ]; then
+    echo "--- Running tests for swf-common-lib ---"
+fi
 pytest
