@@ -4,6 +4,8 @@ set -e
 # Get the directory of the script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 VENV_DIR="$SCRIPT_DIR/venv"
+REQS_TXT="$SCRIPT_DIR/requirements.txt"
+PYPROJECT="$SCRIPT_DIR/pyproject.toml"
 
 # If a virtual environment is already active, use it
 if [ -n "$VIRTUAL_ENV" ]; then
@@ -12,10 +14,21 @@ if [ -n "$VIRTUAL_ENV" ]; then
 elif [ -d "$VENV_DIR" ]; then
     echo "Activating Python environment from $VENV_DIR"
     source "$VENV_DIR/bin/activate"
+# If no environment is active and no local venv exists, create a new venv
 else
-    echo "Error: No active Python environment found and no local venv at $VENV_DIR."
-    echo "This script must be run with an active Python environment."
-    exit 1
+    echo "No active Python environment found. Creating venv at $VENV_DIR."
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    # Install dependencies if requirements.txt or pyproject.toml is present
+    if [ -f "$REQS_TXT" ]; then
+        echo "Installing dependencies from requirements.txt..."
+        pip install -r "$REQS_TXT"
+    elif [ -f "$PYPROJECT" ]; then
+        echo "Installing dependencies from pyproject.toml..."
+        pip install .[test]
+    else
+        echo "No requirements.txt or pyproject.toml found. Skipping dependency install."
+    fi
 fi
 
 echo "Running pytest for swf-common-lib..."
