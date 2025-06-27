@@ -2,7 +2,7 @@ import logging
 import json
 import psycopg2
 from psycopg2 import extras
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.json import JsonFormatter
 import requests
 
 class RestLogHandler(logging.Handler):
@@ -151,7 +151,7 @@ def setup_logger(name, db_params, level=logging.INFO):
         "lineno": "line_no",
     }
 
-    formatter = jsonlogger.JsonFormatter(log_format, rename_fields=rename_map)
+    formatter = JsonFormatter(log_format, rename_fields=rename_map)
     handler.setFormatter(formatter)
 
     if not any(isinstance(h, PostgresLogHandler) for h in logger.handlers):

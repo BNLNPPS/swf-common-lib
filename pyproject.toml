@@ -16,3 +16,6 @@ dependencies = [
 
 [project.urls]
 "Repository" = "https://github.com/bnlnpps/swf-common-lib"
+
+[tool.setuptools.packages.find]
+where = ["src"]

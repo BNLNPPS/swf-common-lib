@@ -2,7 +2,7 @@ import pytest
 import logging
 from unittest.mock import patch, MagicMock
 import psycopg2
-from pythonjsonlogger import jsonlogger
+from pythonjsonlogger.json import JsonFormatter
 
 from swf_common_lib.logging_utils import setup_logger, PostgresLogHandler
 
@@ -62,7 +62,7 @@ def test_postgres_log_handler_emit(mock_json, mock_connect):
         "funcName": "func_name",
         "lineno": "line_no",
     }
-    formatter = jsonlogger.JsonFormatter(log_format, rename_fields=rename_map)
+    formatter = JsonFormatter(log_format, rename_fields=rename_map)
     handler.setFormatter(formatter)
 
     logger = logging.getLogger('emit_test')
