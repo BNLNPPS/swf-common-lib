@@ -20,7 +20,7 @@ mq_passwd   = os.environ.get('MQ_PASSWD',   None)
 mq_port     = int(os.environ.get('MQ_PORT', 61612))
 
 mq_host     = os.environ.get('MQ_HOST',     'pandaserver02.sdcc.bnl.gov')
-mq_cafile   = os.environ.get('MQ_CAFILE',   '../config/full-chain.pem')
+mq_cafile   = os.environ.get('MQ_CAFILE',   '')
 
 
 ###################################################################
@@ -43,6 +43,9 @@ class Messenger:
 
         if(not self.username or not self.password):
             raise ValueError("MQ_USER and MQ_PASSWD environment variables must be set.")
+
+        if(mq_cafile == ''):
+            raise ValueError("MQ_CAFILE environment variable must be set to a valid CA file path.")
 
         self.verbose = verbose
         if self.verbose:
