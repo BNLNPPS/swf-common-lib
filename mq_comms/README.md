@@ -8,10 +8,11 @@ with regards to the contents of the messages sent and received.
 
 ## Environment variables
 
-MQ_USER and MQ_PASSWD environment variables need to be set
-for the package to work.
+`MQ_USER` and `MQ_PASSWD` environment variables need to be set
+for the package to work. Same goes for `MQ_CAFILE`, this needs
+to be the full path to the CA file.
 
-MQ_HOST and MQ_CAFILE have default values in the code.
+MQ_HOST has a default value in the code.
 
 ## Classes
 
