@@ -1,3 +1,8 @@
+# The MQ Communications Module
+# This module provides classes for sending and receiving messages using ActiveMQ/Artemis.
+# It is designed to facilitate communication in the ePIC streaming testbed system.
+# It uses the `stomp.py` library for communication with the ActiveMQ server.
+
 import os
 import sys
 import stomp
@@ -15,7 +20,7 @@ mq_passwd   = os.environ.get('MQ_PASSWD',   None)
 mq_port     = int(os.environ.get('MQ_PORT', 61612))
 
 mq_host     = os.environ.get('MQ_HOST',     'pandaserver02.sdcc.bnl.gov')
-mq_cafile   = os.environ.get('MQ_CAFILE',   daqsim_path + '/config/full-chain.pem')
+mq_cafile   = os.environ.get('MQ_CAFILE',   '../config/full-chain.pem')
 
 
 ###################################################################
