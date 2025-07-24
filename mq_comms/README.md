@@ -12,7 +12,8 @@ with regards to the contents of the messages sent and received.
 for the package to work. Same goes for `MQ_CAFILE`, this needs
 to be the full path to the CA file.
 
-MQ_HOST has a default value in the code.
+`MQ_HOST` and `MQ_PORT` have default values in the code which will work
+for testing right away.
 
 ## Classes
 
