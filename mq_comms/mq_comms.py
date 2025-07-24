@@ -45,7 +45,8 @@ class Messenger:
         if self.verbose:
             print(f"Initializing Messenger with host={self.host}, port={self.port}, username={self.username}")
         
-        self.conn = stomp.Connection(host_and_ports=[(host, port)], vhost=host,try_loopback_connect=False)
+        heartbeats = (5000, 10000) # (client, server) heartbeats in milliseconds
+        self.conn = stomp.Connection(host_and_ports=[(host, port)], vhost=host,try_loopback_connect=False, heartbeats=heartbeats)
         if not self.conn: raise Exception("Connection object is not initialized.")
     
         # Set SSL parameters for the connection
