@@ -4,6 +4,7 @@ import psycopg2
 from psycopg2 import extras
 from pythonjsonlogger.json import JsonFormatter
 import requests
+from datetime import datetime
 
 class RestLogHandler(logging.Handler):
     """
@@ -98,6 +99,21 @@ class PostgresLogHandler(logging.Handler):
             }
             extra_data = {k: v for k, v in log_dict.items() if k not in standard_fields}
 
+            # Parse timestamp string to datetime object
+            timestamp_str = log_dict.get('timestamp')
+            timestamp_obj = None
+            if timestamp_str:
+                try:
+                    # Handle format like "2025-07-18 09:52:47,308"
+                    timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S,%f')
+                except ValueError:
+                    try:
+                        # Handle format like "2025-07-18 09:52:47.308"
+                        timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+                    except ValueError:
+                        # Handle ISO format
+                        timestamp_obj = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+
             insert_sql = """
                 INSERT INTO app_logs (
                     timestamp, level_name, message, module, func_name,
@@ -105,7 +121,7 @@ class PostgresLogHandler(logging.Handler):
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
             """
             self.cursor.execute(insert_sql, (
-                log_dict.get('timestamp'),
+                timestamp_obj,
                 log_dict.get('level_name'),
                 log_dict.get('message'),
                 log_dict.get('module'),
