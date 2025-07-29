@@ -80,6 +80,63 @@ class PostgresLogHandler(logging.Handler):
             self.conn = None
             self.cursor = None
 
+    def _parse_timestamp(self, timestamp_str):
+        """
+        Parse timestamp string with robust handling of different formats.
+        
+        Handles:
+        - Python logging format with comma: "2025-07-18 09:52:47,308"
+        - Python logging format with dot: "2025-07-18 09:52:47.308"  
+        - ISO format with Z: "2025-07-18T09:52:47.308Z"
+        - ISO format with timezone: "2025-07-18T09:52:47.308+00:00"
+        
+        Args:
+            timestamp_str: The timestamp string to parse
+            
+        Returns:
+            datetime object or None if parsing fails
+        """
+        import re
+        import warnings
+        
+        # Try Python logging format with comma (milliseconds)
+        try:
+            return datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S,%f')
+        except ValueError:
+            pass
+            
+        # Try Python logging format with dot (milliseconds)
+        try:
+            return datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            pass
+            
+        # Handle milliseconds that might not be padded to 6 digits
+        # Match formats like "2025-07-18 09:52:47.123" or "2025-07-18 09:52:47,123"
+        match = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[,.](\d+)', timestamp_str)
+        if match:
+            base_time_str, fraction_str = match.groups()
+            # Pad or truncate to 6 digits (microseconds)
+            fraction_padded = fraction_str.ljust(6, '0')[:6]
+            full_timestamp = f"{base_time_str}.{fraction_padded}"
+            try:
+                return datetime.strptime(full_timestamp, '%Y-%m-%d %H:%M:%S.%f')
+            except ValueError:
+                pass
+        
+        # Try ISO formats
+        try:
+            if timestamp_str.endswith('Z'):
+                return datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            else:
+                return datetime.fromisoformat(timestamp_str)
+        except ValueError:
+            pass
+            
+        # Last resort: use current time and warn
+        warnings.warn(f"Could not parse timestamp '{timestamp_str}', using current time")
+        return datetime.now()
+
     def emit(self, record):
         """
         Emits a log record to the database.
@@ -103,16 +160,7 @@ class PostgresLogHandler(logging.Handler):
             timestamp_str = log_dict.get('asctime')
             timestamp_obj = None
             if timestamp_str:
-                try:
-                    # Handle format like "2025-07-18 09:52:47,308"
-                    timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S,%f')
-                except ValueError:
-                    try:
-                        # Handle format like "2025-07-18 09:52:47.308"
-                        timestamp_obj = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
-                    except ValueError:
-                        # Handle ISO format
-                        timestamp_obj = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                timestamp_obj = self._parse_timestamp(timestamp_str)
 
             insert_sql = """
                 INSERT INTO app_logs (

@@ -51,7 +51,7 @@ logger.error("An error occurred")
 
 #### API Reference
 
-**`setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000', timeout=5)`**
+**`setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000', timeout=10)`**
 
 Sets up REST logging for an agent.
 
@@ -59,7 +59,7 @@ Sets up REST logging for an agent.
 - `app_name` (str): Name of your application/agent
 - `instance_name` (str): Unique identifier for this instance  
 - `base_url` (str): URL of swf-monitor service (default: 'http://localhost:8000')
-- `timeout` (int): Timeout in seconds for REST requests (default: 5)
+- `timeout` (int): Timeout in seconds for REST requests (default: 10)
 
 **Returns:**
 - Configured logger ready to use

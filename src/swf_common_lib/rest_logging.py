@@ -44,22 +44,35 @@ class RestLogHandler(logging.Handler):
             response.raise_for_status()
             
         except Exception as e:
-            # Print warning and fall back to standard logging on first failure
+            # Use proper logging for warnings on first failure
             if not self.connection_failed:
-                print(f"WARNING: REST logging failed to send log to swf-monitor at {self.logs_url}: {e}")
-                print("WARNING: REST logging falling back to standard console logging")
+                # Use a separate logger for infrastructure warnings to avoid circular dependencies
+                import logging
+                infra_logger = logging.getLogger('swf_common_lib.rest_logging')
+                if not infra_logger.handlers:
+                    # If no handlers configured, add a simple console handler
+                    console_handler = logging.StreamHandler()
+                    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+                    infra_logger.addHandler(console_handler)
+                    infra_logger.setLevel(logging.WARNING)
+                
+                infra_logger.warning(f"REST logging failed to send log to swf-monitor at {self.logs_url}: {e}")
+                infra_logger.warning("REST logging falling back to standard console logging")
                 self.connection_failed = True
             
             # Fall back to console handler if available
             if self.fallback_handler:
                 self.fallback_handler.emit(record)
             else:
-                # This should not happen if setup_rest_logging() was used correctly
-                print(f"WARNING: REST logging has no fallback handler configured")
-                print(f"{record.levelname}: {record.getMessage()}")
+                # This is a serious configuration error - raise an exception
+                raise RuntimeError(
+                    f"REST logging failed and no fallback handler is configured. "
+                    f"This indicates setup_rest_logging() was not used correctly. "
+                    f"Original log message: {record.levelname}: {record.getMessage()}"
+                )
 
 
-def setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000', timeout=5):
+def setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000', timeout=10):
     """
     Setup REST logging for an agent.
     
@@ -67,7 +80,7 @@ def setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000'
         app_name: Name of your application/agent
         instance_name: Unique identifier for this instance
         base_url: URL of swf-monitor service
-        timeout: Timeout in seconds for REST requests (default: 5)
+        timeout: Timeout in seconds for REST requests (default: 10)
     
     Returns:
         Configured logger ready to use
