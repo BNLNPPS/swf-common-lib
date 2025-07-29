@@ -94,13 +94,13 @@ class PostgresLogHandler(logging.Handler):
 
             # Separate standard fields from extra data
             standard_fields = {
-                'timestamp', 'level_name', 'message', 'module',
+                'asctime', 'level_name', 'message', 'module',
                 'func_name', 'line_no', 'process', 'thread'
             }
             extra_data = {k: v for k, v in log_dict.items() if k not in standard_fields}
 
             # Parse timestamp string to datetime object
-            timestamp_str = log_dict.get('timestamp')
+            timestamp_str = log_dict.get('asctime')
             timestamp_obj = None
             if timestamp_str:
                 try:
@@ -158,7 +158,7 @@ def setup_logger(name, db_params, level=logging.INFO):
     handler = PostgresLogHandler(db_params)
 
     log_format = (
-        '%(timestamp)s %(levelname)s %(name)s %(message)s '
+        '%(asctime)s %(levelname)s %(name)s %(message)s '
         '%(module)s %(funcName)s %(lineno)d %(process)d %(thread)d'
     )
     rename_map = {
