@@ -1,109 +1,160 @@
 import pytest
 import logging
 from unittest.mock import patch, MagicMock
-import psycopg2
+import requests
 from pythonjsonlogger.json import JsonFormatter
 
-from swf_common_lib.logging_utils import setup_logger, PostgresLogHandler
+from swf_common_lib.logging_utils import setup_rest_logging, RestLogHandler
 
-# Mock database parameters
-DB_PARAMS = {
-    'dbname': 'testdb',
-    'user': 'testuser',
-    'password': 'testpass',
-    'host': 'localhost',
-    'port': '5432'
-}
 
-@patch('swf_common_lib.logging_utils.psycopg2.connect')
-def test_setup_logger(mock_connect):
-    """Test that the logger is set up correctly."""
+@patch('swf_common_lib.logging_utils.requests.post')
+def test_rest_log_handler_emit(mock_post):
+    """Test that the REST handler sends log records to the API endpoint."""
     # Arrange
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_connect.return_value = mock_conn
-    mock_conn.cursor.return_value = mock_cursor
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_post.return_value = mock_response
 
-    # Act
-    logger = setup_logger('test_logger', db_params=DB_PARAMS, level=logging.DEBUG)
-
-    # Assert
-    assert logger.name == 'test_logger'
-    assert logger.level == logging.DEBUG
-    assert len(logger.handlers) == 1
-    assert isinstance(logger.handlers[0], PostgresLogHandler)
-    mock_connect.assert_called_once_with(**DB_PARAMS)
-    mock_cursor.execute.assert_called_once() # For the CREATE TABLE IF NOT EXISTS
-    mock_conn.commit.assert_called_once()
-
-@patch('swf_common_lib.logging_utils.psycopg2.connect')
-@patch('swf_common_lib.logging_utils.extras.Json')
-def test_postgres_log_handler_emit(mock_json, mock_connect):
-    """Test that the handler tries to insert a log record into the DB."""
-    # Arrange
-    mock_conn = MagicMock()
-    mock_cursor = MagicMock()
-    mock_connect.return_value = mock_conn
-    mock_conn.cursor.return_value = mock_cursor
-
-    def json_side_effect(data):
-        instance = MagicMock()
-        instance.adapted = data
-        return instance
-    mock_json.side_effect = json_side_effect
-
-    handler = PostgresLogHandler(db_params=DB_PARAMS)
-    log_format = (
-        '%(timestamp)s %(levelname)s %(name)s %(message)s '
-        '%(module)s %(funcName)s %(lineno)d %(process)d %(thread)d'
-    )
-    rename_map = {
-        "levelname": "level_name",
-        "funcName": "func_name",
-        "lineno": "line_no",
-    }
-    formatter = JsonFormatter(log_format, rename_fields=rename_map)
+    handler = RestLogHandler('http://localhost:8002/api/v1/logs/', token='test-token')
+    
+    # Use JsonFormatter to match production setup
+    log_format = '%(asctime)s %(name)s %(levelname)s %(module)s %(funcName)s %(lineno)d %(message)s'
+    formatter = JsonFormatter(log_format, rename_fields={'funcName': 'funcname'})
     handler.setFormatter(formatter)
 
-    logger = logging.getLogger('emit_test')
-    # Clear existing handlers
-    if logger.hasHandlers():
-        logger.handlers.clear()
+    logger = logging.getLogger('rest_test')
+    logger.handlers.clear()
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
     # Act
-    extra_info = {'request_id': '12345'}
-    logger.info("This is a test message", extra=extra_info)
+    logger.info("This is a test message")
 
     # Assert
-    # Check that execute was called twice: once for CREATE TABLE, once for INSERT
-    assert mock_cursor.execute.call_count == 2
-    insert_call_args = mock_cursor.execute.call_args[0][0]
-    assert "INSERT INTO app_logs" in insert_call_args
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+    
+    # Check URL (first positional argument)
+    assert call_args[0][0] == 'http://localhost:8002/api/v1/logs/'
+    
+    # Check headers (keyword argument)
+    expected_headers = {
+        'Content-type': 'application/json',
+        'Authorization': 'Token test-token'
+    }
+    assert call_args[1]['headers'] == expected_headers
+    
+    # Check that data contains JSON log entry
+    log_data = call_args[1]['data']
+    assert 'This is a test message' in log_data
+    assert 'INFO' in log_data
 
-    # Check that the log data was passed correctly
-    insert_call_data = mock_cursor.execute.call_args[0][1]
-    assert insert_call_data[1] == 'INFO'  # level_name
-    assert insert_call_data[2] == 'This is a test message' # message
-    # The last argument should be a Json object containing the extra data
-    extra_data_json = insert_call_data[-1]
-    assert extra_data_json.adapted['request_id'] == '12345'
 
-@patch('swf_common_lib.logging_utils.psycopg2.connect')
-def test_handler_connection_failure(mock_connect, capsys):
-    """Test that a connection failure is handled gracefully."""
+@patch('swf_common_lib.logging_utils.requests.post')
+def test_rest_log_handler_no_token(mock_post):
+    """Test that the handler works without authentication token."""
     # Arrange
-    mock_connect.side_effect = psycopg2.Error("Connection failed")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_post.return_value = mock_response
+
+    handler = RestLogHandler('http://localhost:8002/api/v1/logs/')
+    
+    log_format = '%(asctime)s %(name)s %(levelname)s %(message)s'
+    formatter = JsonFormatter(log_format)
+    handler.setFormatter(formatter)
+
+    logger = logging.getLogger('no_token_test')
+    logger.handlers.clear()
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
     # Act
-    handler = PostgresLogHandler(db_params=DB_PARAMS)
-    logger = logging.getLogger('failure_test')
+    logger.info("Test without token")
+
+    # Assert
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+    
+    # Check headers (should not include Authorization)
+    expected_headers = {'Content-type': 'application/json'}
+    assert call_args[1]['headers'] == expected_headers
+
+
+@patch('swf_common_lib.logging_utils.requests.post')
+def test_rest_log_handler_request_exception(mock_post, capsys):
+    """Test that request exceptions are handled gracefully."""
+    # Arrange
+    mock_post.side_effect = requests.RequestException("Connection failed")
+    
+    handler = RestLogHandler('http://localhost:8002/api/v1/logs/')
+    formatter = JsonFormatter('%(message)s')
+    handler.setFormatter(formatter)
+
+    logger = logging.getLogger('exception_test')
+    logger.handlers.clear()
     logger.addHandler(handler)
-    logger.info("This should not be logged to the db")
+    logger.setLevel(logging.INFO)
+
+    # Act
+    logger.info("This should fail to send")
 
     # Assert
     captured = capsys.readouterr()
-    assert "Could not connect to PostgreSQL for logging: Connection failed" in captured.err
-    # The cursor should not have been called
-    assert not handler.cursor
+    assert "Failed to send log to http://localhost:8002/api/v1/logs/: Connection failed" in captured.err
+
+
+def test_setup_rest_logging():
+    """Test that setup_rest_logging creates a properly configured logger."""
+    # Act
+    logger = setup_rest_logging(
+        app_name='test_app',
+        instance_name='test_instance',
+        base_url='http://localhost:8002',
+        token='test-token',
+        level=logging.DEBUG
+    )
+
+    # Assert
+    assert logger.name == 'test_app.test_instance'
+    assert logger.level == logging.DEBUG
+    assert len(logger.handlers) == 1
+    assert isinstance(logger.handlers[0], RestLogHandler)
+    
+    # Check handler configuration
+    handler = logger.handlers[0]
+    assert handler.url == 'http://localhost:8002/api/v1/logs/'
+    assert handler.token == 'test-token'
+    
+    # Check formatter
+    formatter = handler.formatter
+    assert isinstance(formatter, JsonFormatter)
+
+
+@patch('swf_common_lib.logging_utils.requests.post')
+def test_setup_rest_logging_integration(mock_post):
+    """Test the complete setup_rest_logging integration."""
+    # Arrange
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_post.return_value = mock_response
+
+    # Act
+    logger = setup_rest_logging(
+        app_name='integration_test',
+        instance_name='instance_1',
+        base_url='http://localhost:8002'
+    )
+    
+    logger.info("Integration test message", extra={'custom_field': 'custom_value'})
+
+    # Assert
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+    
+    # Verify the log data contains expected fields
+    log_data = call_args[1]['data']
+    assert 'Integration test message' in log_data
+    assert 'integration_test.instance_1' in log_data
+    assert 'custom_field' in log_data
+    assert 'funcname' in log_data  # Should be renamed from funcName
