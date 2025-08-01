@@ -47,6 +47,12 @@ class RestLogHandler(logging.Handler):
                         if key in ['NO_PROXY', 'no_proxy']:
                             os.environ[key] = value
         
+        # Unset proxy variables if we're connecting to localhost
+        if 'localhost' in self.logs_url or '127.0.0.1' in self.logs_url:
+            for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
+                if proxy_var in os.environ:
+                    del os.environ[proxy_var]
+        
     def emit(self, record):
         """Send log record to REST API."""
         try:
