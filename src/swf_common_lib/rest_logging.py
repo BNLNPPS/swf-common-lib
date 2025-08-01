@@ -23,6 +23,30 @@ class RestLogHandler(logging.Handler):
         self.fallback_handler = fallback_handler
         self.timeout = timeout
         
+        # Load proxy settings from ~/.env if not already in environment
+        self._load_proxy_settings()
+    
+    def _load_proxy_settings(self):
+        """Load proxy bypass settings from ~/.env file."""
+        import os
+        from pathlib import Path
+        
+        env_file = Path.home() / ".env"
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        if line.startswith('export '):
+                            line = line[7:]  # Remove 'export '
+                        key, value = line.split('=', 1)
+                        key = key.strip()
+                        value = value.strip('"\'')
+                        
+                        # Set proxy-related environment variables
+                        if key in ['NO_PROXY', 'no_proxy']:
+                            os.environ[key] = value
+        
     def emit(self, record):
         """Send log record to REST API."""
         try:
@@ -31,16 +55,28 @@ class RestLogHandler(logging.Handler):
                 'instance_name': self.instance_name,
                 'timestamp': datetime.fromtimestamp(record.created).isoformat(),
                 'level': record.levelno,
-                'level_name': record.levelname,
+                'levelname': record.levelname,
                 'message': record.getMessage(),
                 'module': record.module or 'unknown',
-                'func_name': record.funcName or 'unknown',
-                'line_no': record.lineno or 0,
+                'funcname': record.funcName or 'unknown',
+                'lineno': record.lineno or 0,
                 'process': record.process or 0,
                 'thread': record.thread or 0,
+                'extra_data': {
+                    'pathname': record.pathname,
+                    'filename': record.filename,
+                    'created': record.created,
+                    'msecs': record.msecs,
+                }
             }
             
             response = self.session.post(self.logs_url, json=log_data, timeout=self.timeout)
+            if response.status_code == 400:
+                # Log the detailed error for debugging
+                import logging
+                debug_logger = logging.getLogger('swf_common_lib.rest_logging.debug')
+                debug_logger.error(f"400 Bad Request details: {response.text}")
+                debug_logger.error(f"Sent data: {log_data}")
             response.raise_for_status()
             
         except Exception as e:
@@ -72,7 +108,7 @@ class RestLogHandler(logging.Handler):
                 )
 
 
-def setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000', timeout=10):
+def setup_rest_logging(app_name, instance_name, base_url=None, timeout=10):
     """
     Setup REST logging for an agent.
     
@@ -85,6 +121,11 @@ def setup_rest_logging(app_name, instance_name, base_url='http://localhost:8000'
     Returns:
         Configured logger ready to use
     """
+    # Use environment variable if base_url not provided
+    if base_url is None:
+        import os
+        base_url = os.getenv('SWF_MONITOR_HTTP_URL', 'http://localhost:8002')
+    
     logger = logging.getLogger(app_name)
     
     # Clear existing handlers to avoid duplicates
