@@ -1,3 +1,13 @@
+
+# Code
+*.code-workspace
+
+# emacs
+*~
+
+# Text files will be used for testing, no need to commit.
+*.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

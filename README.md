@@ -85,4 +85,3 @@ When the monitor service is available, logs are sent to the database via REST AP
 ### Logging Utils (`swf_common_lib.logging_utils`)
 
 Traditional logging utilities for PostgreSQL database integration.
-
