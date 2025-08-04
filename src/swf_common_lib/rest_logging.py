@@ -15,7 +15,7 @@ class RestLogHandler(logging.Handler):
     
     def __init__(self, base_url, app_name, instance_name, fallback_handler=None, timeout=5):
         super().__init__()
-        self.logs_url = f"{base_url.rstrip('/')}/api/v1/logs/"
+        self.logs_url = f"{base_url.rstrip('/')}/api/logs/"
         self.app_name = app_name
         self.instance_name = instance_name
         self.session = requests.Session()
