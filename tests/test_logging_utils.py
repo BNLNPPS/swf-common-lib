@@ -15,7 +15,7 @@ def test_rest_log_handler_emit(mock_post):
     mock_response.status_code = 200
     mock_post.return_value = mock_response
 
-    handler = RestLogHandler('http://localhost:8002/api/v1/logs/', token='test-token')
+    handler = RestLogHandler('http://localhost:8002/api/logs/', token='test-token')
     
     # Use JsonFormatter to match production setup
     log_format = '%(asctime)s %(name)s %(levelname)s %(module)s %(funcName)s %(lineno)d %(message)s'
@@ -35,7 +35,7 @@ def test_rest_log_handler_emit(mock_post):
     call_args = mock_post.call_args
     
     # Check URL (first positional argument)
-    assert call_args[0][0] == 'http://localhost:8002/api/v1/logs/'
+    assert call_args[0][0] == 'http://localhost:8002/api/logs/'
     
     # Check headers (keyword argument)
     expected_headers = {
@@ -58,7 +58,7 @@ def test_rest_log_handler_no_token(mock_post):
     mock_response.status_code = 200
     mock_post.return_value = mock_response
 
-    handler = RestLogHandler('http://localhost:8002/api/v1/logs/')
+    handler = RestLogHandler('http://localhost:8002/api/logs/')
     
     log_format = '%(asctime)s %(name)s %(levelname)s %(message)s'
     formatter = JsonFormatter(log_format)
@@ -87,7 +87,7 @@ def test_rest_log_handler_request_exception(mock_post, capsys):
     # Arrange
     mock_post.side_effect = requests.RequestException("Connection failed")
     
-    handler = RestLogHandler('http://localhost:8002/api/v1/logs/')
+    handler = RestLogHandler('http://localhost:8002/api/logs/')
     formatter = JsonFormatter('%(message)s')
     handler.setFormatter(formatter)
 
@@ -101,7 +101,7 @@ def test_rest_log_handler_request_exception(mock_post, capsys):
 
     # Assert
     captured = capsys.readouterr()
-    assert "Failed to send log to http://localhost:8002/api/v1/logs/: Connection failed" in captured.err
+    assert "Failed to send log to http://localhost:8002/api/logs/: Connection failed" in captured.err
 
 
 def test_setup_rest_logging():
@@ -123,7 +123,7 @@ def test_setup_rest_logging():
     
     # Check handler configuration
     handler = logger.handlers[0]
-    assert handler.url == 'http://localhost:8002/api/v1/logs/'
+    assert handler.url == 'http://localhost:8002/api/logs/'
     assert handler.token == 'test-token'
     
     # Check formatter

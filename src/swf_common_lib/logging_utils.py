@@ -55,7 +55,7 @@ def setup_rest_logging(app_name, instance_name, base_url, token=None, level=logg
     logger.handlers.clear()
 
     # Set up REST handler
-    rest_url = f"{base_url}/api/v1/logs/"
+    rest_url = f"{base_url}/api/logs/"
     handler = RestLogHandler(rest_url, token=token)
 
     log_format = (
