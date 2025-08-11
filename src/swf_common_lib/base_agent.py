@@ -11,9 +11,19 @@ import json
 import logging
 from pathlib import Path
 
+
+class APIError(Exception):
+    """Exception raised for API-related failures."""
+    
+    def __init__(self, message, response=None, url=None, method=None):
+        super().__init__(message)
+        self.response = response
+        self.url = url
+        self.method = method
+
 def setup_environment():
     """Auto-activate venv and load environment variables."""
-    script_dir = Path(__file__).resolve().parent.parent  # Go up to swf-testbed root
+    script_dir = Path(__file__).resolve().parent.parent.parent.parent / "swf-testbed"
     
     # Auto-activate virtual environment if not already active
     if "VIRTUAL_ENV" not in os.environ:
@@ -305,11 +315,12 @@ class ExampleAgent(stomp.ConnectionListener):
                     logging.info(f"Resource already exists (normal): {method.upper()} {url}")
                     return {"status": "already_exists"}
             
-            logging.error(f"API request FAILED - TERMINATING: {method.upper()} {url} - {e}")
+            logging.error(f"API request FAILED: {method.upper()} {url} - {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logging.error(f"Response status: {e.response.status_code}")
                 logging.error(f"Response body: {e.response.text}")
-            raise RuntimeError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}") from e
+            raise APIError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}", 
+                          response=getattr(e, 'response', None), url=url, method=method.upper()) from e
 
     def send_heartbeat(self):
         """Registers the agent and sends a heartbeat to the monitor."""
