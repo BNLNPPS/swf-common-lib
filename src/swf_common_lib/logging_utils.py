@@ -38,7 +38,7 @@ def setup_rest_logging(app_name, instance_name, base_url, token=None, level=logg
     Sets up a logger that sends records to a REST API endpoint.
     
     Args:
-        app_name: Name of the application (e.g., 'example_agent')
+        app_name: Name of the application (e.g., 'data_agent')
         instance_name: Specific instance name (e.g., 'data-agent-1')
         base_url: Base URL of the REST API (e.g., 'http://localhost:8002')
         token: Optional authentication token

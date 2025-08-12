@@ -1,5 +1,5 @@
 """
-This module contains the base class for all example agents.
+This module contains the base class for all agents.
 """
 
 import os
@@ -11,9 +11,19 @@ import json
 import logging
 from pathlib import Path
 
+
+class APIError(Exception):
+    """Exception raised for API-related failures."""
+    
+    def __init__(self, message, response=None, url=None, method=None):
+        super().__init__(message)
+        self.response = response
+        self.url = url
+        self.method = method
+
 def setup_environment():
     """Auto-activate venv and load environment variables."""
-    script_dir = Path(__file__).resolve().parent.parent  # Go up to swf-testbed root
+    script_dir = Path(__file__).resolve().parent.parent.parent.parent / "swf-testbed"
     
     # Auto-activate virtual environment if not already active
     if "VIRTUAL_ENV" not in os.environ:
@@ -73,7 +83,7 @@ stomp_logger.setLevel(logging.DEBUG)
 stomp_logger.addHandler(console_handler)
 
 
-class ExampleAgent(stomp.ConnectionListener):
+class BaseAgent(stomp.ConnectionListener):
     """
     A base class for creating standalone STF workflow agents.
 
@@ -86,7 +96,7 @@ class ExampleAgent(stomp.ConnectionListener):
     def __init__(self, agent_type, subscription_queue):
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
-        self.agent_name = f"{self.agent_type.lower()}-agent-example"
+        self.agent_name = f"{self.agent_type.lower()}-agent"
 
         # Configuration from environment variables
         self.monitor_url = os.getenv('SWF_MONITOR_URL', 'http://localhost:8002').rstrip('/')
@@ -105,7 +115,7 @@ class ExampleAgent(stomp.ConnectionListener):
         self.ssl_key_file = os.getenv('ACTIVEMQ_SSL_KEY_FILE', '')
         
         # Set up centralized REST logging
-        self.logger = setup_rest_logging('example_agent', self.agent_name, self.base_url)
+        self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
 
         # Create connection matching swf-common-lib working example
         self.conn = stomp.Connection(
@@ -305,11 +315,12 @@ class ExampleAgent(stomp.ConnectionListener):
                     logging.info(f"Resource already exists (normal): {method.upper()} {url}")
                     return {"status": "already_exists"}
             
-            logging.error(f"API request FAILED - TERMINATING: {method.upper()} {url} - {e}")
+            logging.error(f"API request FAILED: {method.upper()} {url} - {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logging.error(f"Response status: {e.response.status_code}")
                 logging.error(f"Response body: {e.response.text}")
-            raise RuntimeError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}") from e
+            raise APIError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}", 
+                          response=getattr(e, 'response', None), url=url, method=method.upper()) from e
 
     def send_heartbeat(self):
         """Registers the agent and sends a heartbeat to the monitor."""
@@ -320,7 +331,7 @@ class ExampleAgent(stomp.ConnectionListener):
         
         # Build description with connection details
         mq_status = "connected" if getattr(self, 'mq_connected', False) else "disconnected"
-        description = f"Example {self.agent_type} agent. MQ: {mq_status}"
+        description = f"{self.agent_type} agent. MQ: {mq_status}"
         
         payload = {
             "instance_name": self.agent_name,
@@ -345,7 +356,7 @@ class ExampleAgent(stomp.ConnectionListener):
         
         # Build description with connection details
         mq_status = "connected" if getattr(self, 'mq_connected', False) else "disconnected"
-        description_parts = [f"Example {self.agent_type} agent", f"MQ: {mq_status}"]
+        description_parts = [f"{self.agent_type} agent", f"MQ: {mq_status}"]
         
         # Add workflow context if provided
         if workflow_metadata:
@@ -378,7 +389,7 @@ class ExampleAgent(stomp.ConnectionListener):
         """Report agent status change to monitor."""
         logging.info(f"Reporting agent status: {status}")
         
-        description_parts = [f"Example {self.agent_type} agent"]
+        description_parts = [f"{self.agent_type} agent"]
         if message:
             description_parts.append(message)
         if error_details:
