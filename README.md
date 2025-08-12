@@ -5,6 +5,7 @@ Common libraries and utilities for the swf-testbed ePIC streaming workflow testb
 ## Overview
 
 This library provides shared functionality for SWF agents, including logging utilities and REST API integration for the swf-monitor service.
+Also included are utility classes wrapping MQ and Rucio communications.
 
 ## Installation
 
