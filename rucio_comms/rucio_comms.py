@@ -1,3 +1,5 @@
+# Based on the Rucio workflow example written up by Xin
+# -*- coding: utf-8 -*-
 from rucio.client import Client as RucioClient
 from rucio.client.uploadclient import UploadClient
 from rucio.common.exception import RucioException
@@ -477,7 +479,9 @@ class DatasetManager:
         self.client = rucio_client if rucio_client else RucioClient()
         self.logger = logger if logger else logging.getLogger(__name__)
         self._created_datasets = set()  # Track created datasets
-        
+    
+    
+    # ---    
     def create_dataset(
         self,
         dataset_name: str,
@@ -577,7 +581,48 @@ class DatasetManager:
             error_msg = f"Failed to create dataset {dataset_name}: {str(e)}"
             self.logger.error(error_msg)
             raise DatasetError(error_msg) from e
-
+        
+    def get_dataset_metadata(self, dataset_name: str, scope: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata of a dataset.
+        
+        Args:
+            dataset_name: Name of the dataset
+            scope: Dataset scope (will be extracted if not provided)
+            
+        Returns:
+            Dataset metadata dictionary or None if not found
+            
+        Raises:
+            DatasetError: If operation fails
+        """    
+        try:
+            # Extract scope if not provided
+            if scope is None:
+                scope, dataset_name = RucioUtils.extract_scope(dataset_name)
+                
+            self.logger.debug(f"Getting metadata for dataset: {scope}:{dataset_name}")
+            
+            try:
+                metadata = self.client.get_metadata(scope=scope, name=dataset_name)
+                
+                # Add state information like in PanDA
+                if metadata.get("is_open", False) and metadata.get("did_type") != "CONTAINER":
+                    metadata["state"] = "open"
+                else:
+                    metadata["state"] = "closed"
+                    
+                return metadata
+                
+            except DataIdentifierNotFound:
+                self.logger.warning(f"Dataset not found: {scope}:{dataset_name}")
+                return None
+                
+        except Exception as e:
+            error_msg = f"Failed to get metadata for dataset {dataset_name}: {str(e)}"
+            self.logger.error(error_msg)
+            raise DatasetError(error_msg) from e
+            
 
 class RucioOrchestrator:
     """
