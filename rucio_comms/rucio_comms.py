@@ -1,3 +1,5 @@
+# Based on the Rucio workflow example written up by Xin
+# -*- coding: utf-8 -*-
 from rucio.client import Client as RucioClient
 from rucio.client.uploadclient import UploadClient
 from rucio.common.exception import RucioException
