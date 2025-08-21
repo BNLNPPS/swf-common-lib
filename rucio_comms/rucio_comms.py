@@ -123,6 +123,10 @@ class FileManager:
             rucio_client: Optional Rucio client instance
             logger: Optional logger instance
         """
+        
+        # if rucio_client is None:
+        #     print("No Rucio client provided, using default RucioClient. =======================================================================")
+        
         self.client = rucio_client if rucio_client else RucioClient()
         self.logger = logger if logger else logging.getLogger(__name__)
         self._registered_files = set()  # Track registered files
@@ -237,7 +241,8 @@ class FileManager:
         self.logger.info(f"Registration completed: {successful}/{len(files)} files successful")
         
         return results
-        
+
+    # ---        
     def add_files_to_dataset(
         self,
         files: Union[List[FileInfo], List[str]],
@@ -325,7 +330,8 @@ class FileManager:
             error_msg = f"Failed to add files to dataset {dataset_name}: {str(e)}"
             self.logger.error(error_msg)
             raise FileRegistrationError(error_msg) from e
-            
+
+    # ---            
     def create_file_from_pfn(
         self,
         pfn: str,
