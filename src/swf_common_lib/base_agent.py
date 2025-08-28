@@ -67,20 +67,22 @@ if not os.getenv('SWF_ENV_LOADED'):
 # Import the centralized logging from swf-common-lib
 from swf_common_lib.rest_logging import setup_rest_logging
 
-# Enable STOMP debug logging to see connection details
-logging.basicConfig(level=logging.DEBUG, 
-                    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+# Configure base logging level with environment overrides
+_quiet = os.getenv('SWF_AGENT_QUIET', 'false').lower() in ('1', 'true', 'yes', 'on')
+_level_name = os.getenv('SWF_LOG_LEVEL', 'WARNING' if _quiet else 'INFO').upper()
+_level = getattr(logging, _level_name, logging.INFO)
+logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
-# Console handler for immediate output
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-console_handler.setFormatter(formatter)
-
-# Enable debug logging for stomp.py
+# STOMP logging is very chatty; enable only if explicitly requested
 stomp_logger = logging.getLogger('stomp')
-stomp_logger.setLevel(logging.DEBUG)
-stomp_logger.addHandler(console_handler)
+if os.getenv('SWF_STOMP_DEBUG', 'false').lower() in ('1', 'true', 'yes', 'on'):
+    stomp_logger.setLevel(logging.DEBUG)
+    _stomp_handler = logging.StreamHandler()
+    _stomp_handler.setLevel(logging.DEBUG)
+    _stomp_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+    stomp_logger.addHandler(_stomp_handler)
+else:
+    stomp_logger.setLevel(logging.WARNING)
 
 
 class BaseAgent(stomp.ConnectionListener):
@@ -231,8 +233,11 @@ class BaseAgent(stomp.ConnectionListener):
         """Handle disconnection from ActiveMQ."""
         logging.warning("Disconnected from ActiveMQ - will attempt reconnection")
         self.mq_connected = False
-        # Send heartbeat to update status
-        self.send_heartbeat()
+        # Send heartbeat to update status, but don't let failures crash the receiver thread
+        try:
+            self.send_heartbeat()
+        except Exception as e:
+            logging.warning(f"Heartbeat failed during disconnect: {e}")
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to ActiveMQ."""
@@ -303,7 +308,15 @@ class BaseAgent(stomp.ConnectionListener):
         """
         url = f"{self.monitor_url}/api{endpoint}"
         try:
-            response = self.api.request(method, url, json=json_data, timeout=10)
+            # Do not follow redirects; 3xx usually indicates upstream auth middleware (e.g., OIDC)
+            response = self.api.request(method, url, json=json_data, timeout=10, allow_redirects=False)
+            # Treat redirect as auth/config problem with a clear message
+            if 300 <= response.status_code < 400:
+                loc = response.headers.get('Location', 'unknown')
+                msg = (f"API redirect (HTTP {response.status_code}) to {loc}. "
+                       f"If behind Apache/OIDC, ensure API requests aren't redirected and Authorization is forwarded.")
+                logging.error(msg)
+                raise APIError(msg, response=response, url=url, method=method.upper())
             response.raise_for_status()  # Raise an exception for bad status codes
             return response.json()
         except requests.exceptions.RequestException as e:
