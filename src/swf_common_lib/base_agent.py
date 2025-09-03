@@ -70,7 +70,15 @@ from swf_common_lib.rest_logging import setup_rest_logging
 # Configure base logging level with environment overrides
 _quiet = os.getenv('SWF_AGENT_QUIET', 'false').lower() in ('1', 'true', 'yes', 'on')
 _level_name = os.getenv('SWF_LOG_LEVEL', 'WARNING' if _quiet else 'INFO').upper()
-_level = getattr(logging, _level_name, logging.INFO)
+
+# Validate log level and provide clear error for invalid values
+_valid_levels = {'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTSET'}
+if _level_name not in _valid_levels:
+    print(f"WARNING: Invalid SWF_LOG_LEVEL '{_level_name}'. Valid levels: {', '.join(sorted(_valid_levels))}. Using INFO.")
+    _level = logging.INFO
+else:
+    _level = getattr(logging, _level_name)
+
 logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
 # STOMP logging is very chatty; enable only if explicitly requested
