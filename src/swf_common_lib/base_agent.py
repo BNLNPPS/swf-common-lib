@@ -72,12 +72,13 @@ _quiet = os.getenv('SWF_AGENT_QUIET', 'false').lower() in ('1', 'true', 'yes', '
 _level_name = os.getenv('SWF_LOG_LEVEL', 'WARNING' if _quiet else 'INFO').upper()
 
 # Validate log level and provide clear error for invalid values
-_valid_levels = {'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTSET'}
-if _level_name not in _valid_levels:
+# Use Python's built-in logging level definitions for maintainability
+_valid_levels = set(logging._nameToLevel.keys()) - {'NOTSET'}  # Exclude NOTSET from display
+if _level_name not in logging._nameToLevel:
     print(f"WARNING: Invalid SWF_LOG_LEVEL '{_level_name}'. Valid levels: {', '.join(sorted(_valid_levels))}. Using INFO.")
     _level = logging.INFO
 else:
-    _level = getattr(logging, _level_name)
+    _level = logging._nameToLevel[_level_name]
 
 logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
