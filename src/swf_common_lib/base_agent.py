@@ -72,12 +72,13 @@ _quiet = os.getenv('SWF_AGENT_QUIET', 'false').lower() in ('1', 'true', 'yes', '
 _level_name = os.getenv('SWF_LOG_LEVEL', 'WARNING' if _quiet else 'INFO').upper()
 
 # Validate log level and provide clear error for invalid values
-_valid_levels = {'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTSET'}
-if _level_name not in _valid_levels:
+# Use Python's built-in logging level definitions for maintainability
+_valid_levels = set(logging._nameToLevel.keys()) - {'NOTSET'}  # Exclude NOTSET from display
+if _level_name not in logging._nameToLevel:
     print(f"WARNING: Invalid SWF_LOG_LEVEL '{_level_name}'. Valid levels: {', '.join(sorted(_valid_levels))}. Using INFO.")
     _level = logging.INFO
 else:
-    _level = getattr(logging, _level_name)
+    _level = logging._nameToLevel[_level_name]
 
 logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
@@ -103,10 +104,22 @@ class BaseAgent(stomp.ConnectionListener):
     - Running a persistent process with graceful shutdown.
     """
 
-    def __init__(self, agent_type, subscription_queue):
+    # Standard workflow message types
+    WORKFLOW_MESSAGE_TYPES = {
+        'run_imminent', 'start_run', 'pause_run', 'resume_run', 'end_run',
+        'stf_gen', 'data_ready'
+    }
+
+    def __init__(self, agent_type, subscription_queue, debug=False):
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
-        self.agent_name = f"{self.agent_type.lower()}-agent"
+        self.DEBUG = debug
+
+        # Create unique agent name with username and sequential ID
+        import getpass
+        username = getpass.getuser()
+        agent_id = self.get_next_agent_id()
+        self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
 
         # Configuration from environment variables
         self.monitor_url = os.getenv('SWF_MONITOR_URL', 'http://localhost:8002').rstrip('/')
@@ -190,8 +203,7 @@ class BaseAgent(stomp.ConnectionListener):
                 }
             )
             self.mq_connected = True
-            logging.info("Successfully connected to ActiveMQ")
-            
+
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
             
@@ -285,6 +297,58 @@ class BaseAgent(stomp.ConnectionListener):
         """
         raise NotImplementedError("Subclasses must implement on_message")
 
+    def log_received_message(self, frame, known_types=None):
+        """
+        Helper method to log received messages with type information.
+        Agents can call this at the start of their on_message method.
+
+        Args:
+            frame: The STOMP message frame
+            known_types: Optional set/list of known message types (defaults to WORKFLOW_MESSAGE_TYPES)
+
+        Returns:
+            tuple: (message_data, msg_type) for convenience
+
+        Raises:
+            RuntimeError: If message parsing fails
+        """
+        if known_types is None:
+            known_types = self.WORKFLOW_MESSAGE_TYPES
+
+        try:
+            import json
+            message_data = json.loads(frame.body)
+            msg_type = message_data.get('msg_type', 'unknown')
+
+            if msg_type not in known_types:
+                logging.info(f"{self.agent_type} agent received unknown message type: {msg_type}", extra={"msg_type": msg_type})
+            else:
+                logging.info(f"{self.agent_type} agent received message: {msg_type}")
+
+            return message_data, msg_type
+        except json.JSONDecodeError as e:
+            logging.error(f"CRITICAL: Failed to parse message JSON: {e}")
+            raise RuntimeError(f"Message parsing failed - agent cannot continue: {e}") from e
+
+    def get_next_agent_id(self):
+        """Get the next agent ID from persistent state API."""
+        try:
+            url = f"{self.monitor_url}/api/state/next-agent-id/"
+            response = self.api.post(url, timeout=10)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get('status') == 'success':
+                agent_id = data.get('agent_id')
+                logging.info(f"Got next agent ID from persistent state: {agent_id}")
+                return str(agent_id)  # Return as string for consistency
+            else:
+                raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            logging.error(f"Failed to get next agent ID from API: {e}")
+            raise RuntimeError(f"Critical failure getting agent ID: {e}") from e
+
     def send_message(self, destination, message_body):
         """
         Sends a JSON message to a specific destination.
@@ -345,7 +409,8 @@ class BaseAgent(stomp.ConnectionListener):
 
     def send_heartbeat(self):
         """Registers the agent and sends a heartbeat to the monitor."""
-        logging.info("Sending heartbeat to monitor...")
+        if self.DEBUG:
+            logging.info("Sending heartbeat to monitor...")
         
         # Determine overall status based on MQ connection
         status = "OK" if getattr(self, 'mq_connected', False) else "WARNING"
@@ -364,13 +429,15 @@ class BaseAgent(stomp.ConnectionListener):
         
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
-            logging.info(f"Heartbeat sent successfully. Status: {status}, MQ: {mq_status}")
+            if self.DEBUG:
+                logging.info(f"Heartbeat sent successfully. Status: {status}, MQ: {mq_status}")
         else:
             logging.warning("Failed to send heartbeat to monitor")
     
     def send_enhanced_heartbeat(self, workflow_metadata=None):
         """Send heartbeat with optional workflow metadata."""
-        logging.info("Sending enhanced heartbeat to monitor...")
+        if self.DEBUG:
+            logging.info("Sending heartbeat to monitor...")
         
         # Determine overall status based on MQ connection
         status = "OK" if getattr(self, 'mq_connected', False) else "WARNING"
@@ -400,10 +467,11 @@ class BaseAgent(stomp.ConnectionListener):
         
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
-            logging.info(f"Enhanced heartbeat sent successfully")
+            if self.DEBUG:
+                logging.info(f"Heartbeat sent successfully")
             return True
         else:
-            logging.warning("Failed to send enhanced heartbeat to monitor")
+            logging.warning("Failed to send heartbeat to monitor")
             return False
     
     def report_agent_status(self, status, message=None, error_details=None):
