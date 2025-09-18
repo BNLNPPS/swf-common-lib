@@ -84,7 +84,11 @@ class RestLogHandler(logging.Handler):
                 debug_logger.error(f"400 Bad Request details: {response.text}")
                 debug_logger.error(f"Sent data: {log_data}")
             response.raise_for_status()
-            
+
+            # Also emit to console handler if available (for dual output)
+            if self.fallback_handler:
+                self.fallback_handler.emit(record)
+
         except Exception as e:
             # Use proper logging for warnings on first failure
             if not self.connection_failed:
