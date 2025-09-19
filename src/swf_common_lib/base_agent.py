@@ -10,6 +10,7 @@ import requests
 import json
 import logging
 from pathlib import Path
+from .api_utils import get_next_agent_id
 
 
 class APIError(Exception):
@@ -115,17 +116,23 @@ class BaseAgent(stomp.ConnectionListener):
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
 
+        # Configuration from environment variables (needed for agent ID API call)
+        self.monitor_url = os.getenv('SWF_MONITOR_URL').rstrip('/')
+        self.api_token = os.getenv('SWF_API_TOKEN')
+
+        # Set up API session (needed for agent ID call)
+        import requests
+        self.api = requests.Session()
+        if self.api_token:
+            self.api.headers.update({'Authorization': f'Token {self.api_token}'})
+
         # Create unique agent name with username and sequential ID
         import getpass
         username = getpass.getuser()
         agent_id = self.get_next_agent_id()
         self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
-
-        # Configuration from environment variables
-        self.monitor_url = os.getenv('SWF_MONITOR_URL', 'http://localhost:8002').rstrip('/')
         # Use HTTP URL for REST logging (no auth required)
-        self.base_url = os.getenv('SWF_MONITOR_HTTP_URL', 'http://localhost:8002').rstrip('/')
-        self.api_token = os.getenv('SWF_API_TOKEN')
+        self.base_url = os.getenv('SWF_MONITOR_HTTP_URL').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
         self.mq_port = int(os.getenv('ACTIVEMQ_PORT', 61612))  # STOMP port for Artemis on this system
         self.mq_user = os.getenv('ACTIVEMQ_USER', 'admin')
@@ -140,11 +147,13 @@ class BaseAgent(stomp.ConnectionListener):
         # Set up centralized REST logging
         self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
 
-        # Create connection matching swf-common-lib working example
+        # Create connection with proper heartbeat configuration
         self.conn = stomp.Connection(
             host_and_ports=[(self.mq_host, self.mq_port)],
             vhost=self.mq_host,
-            try_loopback_connect=False
+            try_loopback_connect=False,
+            heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
+            auto_content_length=False
         )
         
         # Configure SSL if enabled - must be done before set_listener
@@ -164,9 +173,6 @@ class BaseAgent(stomp.ConnectionListener):
                 logging.warning("SSL enabled but no CA certificate file specified")
         
         self.conn.set_listener('', self)
-        self.api = requests.Session()
-        if self.api_token:
-            self.api.headers.update({'Authorization': f'Token {self.api_token}'})
         
         # For localhost development, disable SSL verification and proxy
         if 'localhost' in self.monitor_url or '127.0.0.1' in self.monitor_url:
@@ -199,7 +205,7 @@ class BaseAgent(stomp.ConnectionListener):
                 version='1.1',
                 headers={
                     'client-id': self.agent_name,
-                    'heart-beat': '10000,30000'  # Send heartbeat every 10sec, expect server timeout after 30sec
+                    'heart-beat': '30000,30000'  # Send heartbeat every 30sec, expect server every 30sec
                 }
             )
             self.mq_connected = True
@@ -246,7 +252,7 @@ class BaseAgent(stomp.ConnectionListener):
         self.mq_connected = True
     
     def on_error(self, frame):
-        logging.error(f'Received an error from ActiveMQ: {frame.body}')
+        logging.error(f'Received an error from ActiveMQ: body="{frame.body}", headers={frame.headers}, cmd="{frame.cmd}"')
         self.mq_connected = False
     
     def on_disconnected(self):
@@ -276,7 +282,7 @@ class BaseAgent(stomp.ConnectionListener):
                 version='1.1',
                 headers={
                     'client-id': self.agent_name,
-                    'heart-beat': '10000,30000'  # Send heartbeat every 10sec, expect server timeout after 30sec
+                    'heart-beat': '30000,30000'  # Send heartbeat every 30sec, expect server every 30sec
                 }
             )
             
@@ -332,22 +338,7 @@ class BaseAgent(stomp.ConnectionListener):
 
     def get_next_agent_id(self):
         """Get the next agent ID from persistent state API."""
-        try:
-            url = f"{self.monitor_url}/api/state/next-agent-id/"
-            response = self.api.post(url, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-            if data.get('status') == 'success':
-                agent_id = data.get('agent_id')
-                logging.info(f"Got next agent ID from persistent state: {agent_id}")
-                return str(agent_id)  # Return as string for consistency
-            else:
-                raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
-
-        except Exception as e:
-            logging.error(f"Failed to get next agent ID from API: {e}")
-            raise RuntimeError(f"Critical failure getting agent ID: {e}") from e
+        return get_next_agent_id(self.monitor_url, self.api, logging.getLogger(__name__))
 
     def send_message(self, destination, message_body):
         """
