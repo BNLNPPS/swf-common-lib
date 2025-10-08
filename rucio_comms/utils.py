@@ -6,7 +6,7 @@ and common operations, similar to those used in PanDA dataservice modules.
 """
 
 import re
-import hashlib
+import hashlib, zlib
 import os
 from typing import Tuple, Dict, Any, List, Optional
 from datetime import datetime
@@ -14,6 +14,43 @@ from datetime import datetime
 from .exceptions import ValidationError
 
 
+# --- Service utilities
+
+def calculate_file_checksum(filepath, algorithm='md5'):
+    """Calculate checksum of a file"""
+    hash_func = hashlib.new(algorithm)
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_func.update(chunk)
+    return hash_func.hexdigest()
+
+# ---
+def calculate_adler32_from_file(file_path, chunk_size=4096):
+    """
+    Calculates the Adler-32 checksum of a file.
+
+    Args:
+        filepath (str): The path to the file.
+        chunk_size (int): The size of chunks to read from the file.
+
+    Returns:
+        int: The Adler-32 checksum of the file.
+    """
+    adler32_checksum = 1  # Initial Adler-32 value
+
+    try:
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                adler32_checksum = zlib.adler32(chunk, adler32_checksum)
+        return adler32_checksum & 0xffffffff  # Ensure 32-bit unsigned result
+    except:
+        print(f"Adler-32: problem with file {file_path}, exiting")
+        exit(-2)
+
+# --- Main utility classe
 class RucioUtils:
     """Utility class for Rucio-specific operations."""
     
