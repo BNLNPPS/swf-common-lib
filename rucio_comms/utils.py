@@ -13,9 +13,10 @@ from datetime import datetime
 
 from .exceptions import ValidationError
 
+# from . import DatasetManager, RucioClient, UploadClient, FileManager
 
-# --- Service utilities
-
+# --- Service functions
+#
 def calculate_file_checksum(filepath, algorithm='md5'):
     """Calculate checksum of a file"""
     hash_func = hashlib.new(algorithm)
@@ -49,6 +50,33 @@ def calculate_adler32_from_file(file_path, chunk_size=4096):
     except:
         print(f"Adler-32: problem with file {file_path}, exiting")
         exit(-2)
+
+# ---
+def register_file_on_rse(client, rse: str, scope: str, file_path: str, file_name: str):
+    """Register an uploaded file on RSE"""
+    
+    adler = calculate_adler32_from_file(file_path)
+    print(f"Adler32 checksum of the file {file_path}: {adler}")
+    
+    # Initialize Rucio client
+    # client = Client()
+    # replica_client = ReplicaClient()
+    # did_client = DIDClient()
+    
+    # File and RSE information
+    # scope     = 'user.johndoe'  # - Rucio scope defined globally
+    # filename  = 'my_data_file.root' # defined globally
+    # rse_name  = 'CERN-PROD_DATADISK'  # Target RSE defined globally
+    # local_file_path = filename  # Local path to the file to be registered
+    
+    # Physical file name (DID - Data Identifier)
+    # FIXME: Use the actual filename instead of hardcoded 'f'
+    name = 'f'  
+    did = {
+        'scope':    scope,
+        'name':     name
+    }
+
 
 # --- Main utility classe
 class RucioUtils:
