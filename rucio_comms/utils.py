@@ -13,9 +13,10 @@ from datetime import datetime
 
 from .exceptions import ValidationError
 
+from rucio.common.exception import DataIdentifierAlreadyExists, RSENotFound
 
-# --- Service utilities
-
+# --- Service functions
+#
 def calculate_file_checksum(filepath, algorithm='md5'):
     """Calculate checksum of a file"""
     hash_func = hashlib.new(algorithm)
@@ -49,6 +50,58 @@ def calculate_adler32_from_file(file_path, chunk_size=4096):
     except:
         print(f"Adler-32: problem with file {file_path}, exiting")
         exit(-2)
+
+# ---
+# Attributes ti be harvested feom the "data objecy": client, did_client, replica_client, rse: str, scope: str
+def register_file_on_rse(data_obj, file_path: str, file_name: str):
+    """Register an uploaded file on RSE"""
+    
+    adler = calculate_adler32_from_file(file_path)
+    print(f"Adler32 checksum of the file {file_path}: {adler}")
+  
+    did = {
+        'scope':    data_obj.rucio_scope,
+        'name':     file_name
+    }
+
+    try:
+        # Step 1: Get file metadata
+        file_size       = os.path.getsize(file_path)
+        file_checksum   = calculate_file_checksum(file_path, 'md5')
+        
+        print(f"File: {file_name}")
+        print(f"Size: {file_size} bytes")
+        print(f"MD5:  {file_checksum}")
+
+      
+        # Step 2: Check if DID already exists
+        try:
+            existing_did = data_obj.did_client.get_did(data_obj.rucio_scope, file_name)
+            print(f"DID already exists: {existing_did}")
+        except:
+            # DID doesn't exist, we'll create it
+            print("DID doesn't exist yet, will create new one")
+
+        # Register the replica
+        data_obj.rucio_replica_client.add_replica(
+            rse         = data_obj.rse,
+            scope       = data_obj.rucio_scope,
+            name        = file_name,
+            bytes_      = file_size,
+            adler32     = f'{adler:x}',
+            pfn         = f'root://dcintdoor.sdcc.bnl.gov:1094/pnfs/sdcc.bnl.gov/eic/epic/disk/swfdaqtest/{file_name}'
+            )
+        
+        print(f"✓ Replica registered on RSE: {data_obj.rse}")
+
+        return True
+
+    except RSENotFound:
+        print(f"✗ Error: RSE '{data_obj.rse}' not found")
+        return False
+    except Exception as e:
+        print(f"✗ Error registering file: {str(e)}")
+        return False
 
 # --- Main utility classe
 class RucioUtils:
