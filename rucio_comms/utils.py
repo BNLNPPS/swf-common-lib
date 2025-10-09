@@ -13,7 +13,7 @@ from datetime import datetime
 
 from .exceptions import ValidationError
 
-# from . import DatasetManager, RucioClient, UploadClient, FileManager
+from rucio.common.exception import DataIdentifierAlreadyExists, RSENotFound
 
 # --- Service functions
 #
@@ -52,31 +52,56 @@ def calculate_adler32_from_file(file_path, chunk_size=4096):
         exit(-2)
 
 # ---
-def register_file_on_rse(client, rse: str, scope: str, file_path: str, file_name: str):
+# Attributes ti be harvested feom the "data objecy": client, did_client, replica_client, rse: str, scope: str
+def register_file_on_rse(data_obj, file_path: str, file_name: str):
     """Register an uploaded file on RSE"""
     
     adler = calculate_adler32_from_file(file_path)
     print(f"Adler32 checksum of the file {file_path}: {adler}")
-    
-    # Initialize Rucio client
-    # client = Client()
-    # replica_client = ReplicaClient()
-    # did_client = DIDClient()
-    
-    # File and RSE information
-    # scope     = 'user.johndoe'  # - Rucio scope defined globally
-    # filename  = 'my_data_file.root' # defined globally
-    # rse_name  = 'CERN-PROD_DATADISK'  # Target RSE defined globally
-    # local_file_path = filename  # Local path to the file to be registered
-    
-    # Physical file name (DID - Data Identifier)
-    # FIXME: Use the actual filename instead of hardcoded 'f'
-    name = 'f'  
+  
     did = {
-        'scope':    scope,
-        'name':     name
+        'scope':    data_obj.rucio_scope,
+        'name':     file_name
     }
 
+    try:
+        # Step 1: Get file metadata
+        file_size       = os.path.getsize(file_path)
+        file_checksum   = calculate_file_checksum(file_path, 'md5')
+        
+        print(f"File: {file_name}")
+        print(f"Size: {file_size} bytes")
+        print(f"MD5:  {file_checksum}")
+
+      
+        # Step 2: Check if DID already exists
+        try:
+            existing_did = data_obj.did_client.get_did(data_obj.rucio_scope, file_name)
+            print(f"DID already exists: {existing_did}")
+        except:
+            # DID doesn't exist, we'll create it
+            print("DID doesn't exist yet, will create new one")
+
+        # Register the replica
+        data_obj.rucio_replica_client.add_replica(
+            rse         = data_obj.rse,
+            scope       = data_obj.rucio_scope,
+            name        = file_name,
+            bytes_      = file_size,
+            adler32     = f'{adler:x}',
+            pfn         = f'root://dcintdoor.sdcc.bnl.gov:1094/pnfs/sdcc.bnl.gov/eic/epic/disk/swfdaqtest/{file_name}'
+            )
+        
+        print(f"✓ Replica registered on RSE: {data_obj.rse}")
+
+        return True
+
+    except RSENotFound:
+        print(f"✗ Error: RSE '{data_obj.rse}' not found")
+        return False
+    except Exception as e:
+        print(f"✗ Error registering file: {str(e)}")
+        return False
 
 # --- Main utility classe
 class RucioUtils:
