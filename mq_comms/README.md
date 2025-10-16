@@ -23,3 +23,14 @@ be instantiated separately as needed, in a single or multiple
 applications and are agnostic with
 regards to the logic of the simulation.
 
+## Messages
+
+Currently, the _base agent_ class in **common-lib** contains
+a set defined as follows:
+
+```python
+    WORKFLOW_MESSAGE_TYPES = {
+        'run_imminent', 'start_run', 'pause_run', 'resume_run', 'end_run',
+        'stf_gen', 'data_ready'
+    }
+```
