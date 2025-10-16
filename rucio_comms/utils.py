@@ -5,9 +5,7 @@ This module provides helper functions for validation, scope extraction,
 and common operations, similar to those used in PanDA dataservice modules.
 """
 
-import re
-import hashlib, zlib
-import os
+import re, hashlib, zlib, os
 from typing import Tuple, Dict, Any, List, Optional
 from datetime import datetime
 
@@ -15,6 +13,7 @@ from .exceptions import ValidationError
 
 from rucio.common.exception import DataIdentifierAlreadyExists, RSENotFound
 
+###########################################################################
 # --- Service functions
 #
 def calculate_file_checksum(filepath, algorithm='md5'):
@@ -52,7 +51,11 @@ def calculate_adler32_from_file(file_path, chunk_size=4096):
         exit(-2)
 
 # ---
-# Attributes ti be harvested feom the "data objecy": client, did_client, replica_client, rse: str, scope: str
+# This is a helper method to register a file on RSE after it has been uploaded.
+#
+# It expects an object with some necessary attributes, e.g. the "data object" defined in relevant class.
+# Attributes ti be harvested feom the "data object": client, did_client, replica_client, dataset, rse: str, scope: str
+# ---
 def register_file_on_rse(data_obj, file_path: str, file_name: str):
     """Register an uploaded file on RSE"""
     
@@ -82,6 +85,8 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
             # DID doesn't exist, we'll create it
             print("DID doesn't exist yet, will create new one")
 
+        dataset_folder = data_obj.dataset
+
         # Register the replica
         data_obj.rucio_replica_client.add_replica(
             rse         = data_obj.rse,
@@ -89,7 +94,7 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
             name        = file_name,
             bytes_      = file_size,
             adler32     = f'{adler:x}',
-            pfn         = f'root://dcintdoor.sdcc.bnl.gov:1094/pnfs/sdcc.bnl.gov/eic/epic/disk/swfdaqtest/{file_name}'
+            pfn         = f'root://dcintdoor.sdcc.bnl.gov:1094/pnfs/sdcc.bnl.gov/eic/epic/disk/swfdaqtest/{dataset_folder}/{file_name}'
             )
         
         print(f"✓ Replica registered on RSE: {data_obj.rse}")
