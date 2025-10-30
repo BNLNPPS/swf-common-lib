@@ -137,12 +137,16 @@ class BaseAgent(stomp.ConnectionListener):
         self.mq_port = int(os.getenv('ACTIVEMQ_PORT', 61612))  # STOMP port for Artemis on this system
         self.mq_user = os.getenv('ACTIVEMQ_USER', 'admin')
         self.mq_password = os.getenv('ACTIVEMQ_PASSWORD', 'admin')
-        
+
         # SSL configuration
         self.use_ssl = os.getenv('ACTIVEMQ_USE_SSL', 'False').lower() == 'true'
         self.ssl_ca_certs = os.getenv('ACTIVEMQ_SSL_CA_CERTS', '')
         self.ssl_cert_file = os.getenv('ACTIVEMQ_SSL_CERT_FILE', '')
         self.ssl_key_file = os.getenv('ACTIVEMQ_SSL_KEY_FILE', '')
+
+        # Track multiple subscriptions for queue-based messaging (new in fast processing workflow)
+        self._subscriptions = []  # List of subscription configs for reconnection
+        self._next_subscription_id = 2  # Start at 2 (id=1 used by primary subscription)
         
         # Set up centralized REST logging
         self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
@@ -266,15 +270,15 @@ class BaseAgent(stomp.ConnectionListener):
             logging.warning(f"Heartbeat failed during disconnect: {e}")
 
     def _attempt_reconnect(self):
-        """Attempt to reconnect to ActiveMQ."""
+        """Attempt to reconnect to ActiveMQ and restore all subscriptions."""
         if self.mq_connected:
             return True
-            
+
         try:
             logging.info("Attempting to reconnect to ActiveMQ...")
             if self.conn.is_connected():
                 self.conn.disconnect()
-            
+
             self.conn.connect(
                 self.mq_user,
                 self.mq_password,
@@ -285,12 +289,27 @@ class BaseAgent(stomp.ConnectionListener):
                     'heart-beat': '30000,30000'  # Send heartbeat every 30sec, expect server every 30sec
                 }
             )
-            
+
+            # Restore primary subscription
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
+
+            # Restore additional queue/topic subscriptions
+            for sub_config in self._subscriptions:
+                try:
+                    self.conn.subscribe(
+                        destination=sub_config['destination'],
+                        id=sub_config['id'],
+                        ack=sub_config['ack'],
+                        headers=sub_config['headers']
+                    )
+                    logging.info(f"Restored subscription to {sub_config['destination']} (id={sub_config['id']})")
+                except Exception as sub_e:
+                    logging.error(f"Failed to restore subscription {sub_config['id']}: {sub_e}")
+
             self.mq_connected = True
             logging.info("Successfully reconnected to ActiveMQ")
             return True
-            
+
         except Exception as e:
             logging.warning(f"Reconnection attempt failed: {e}")
             self.mq_connected = False
@@ -342,14 +361,14 @@ class BaseAgent(stomp.ConnectionListener):
 
     def send_message(self, destination, message_body):
         """
-        Sends a JSON message to a specific destination.
+        Sends a JSON message to a specific destination (topic or queue).
         """
         try:
             self.conn.send(body=json.dumps(message_body), destination=destination)
             logging.info(f"Sent message to '{destination}': {message_body}")
         except Exception as e:
             logging.error(f"Failed to send message to '{destination}': {e}")
-            
+
             # Check for SSL/connection errors that indicate disconnection
             if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
                 logging.warning("Connection error detected - attempting recovery")
@@ -363,6 +382,199 @@ class BaseAgent(stomp.ConnectionListener):
                         logging.error(f"Retry failed after reconnection: {retry_e}")
                 else:
                     logging.error("Reconnection failed - message lost")
+
+    def send_to_queue(self, queue_name, message_body, headers=None):
+        """
+        Sends a message to a specific queue with optional headers.
+
+        Args:
+            queue_name: Queue destination (e.g., '/queue/panda.transformer.slices')
+            message_body: Message body (will be JSON-encoded if dict)
+            headers: Optional dict of message headers (e.g., {'task-id': '12345'})
+        """
+        try:
+            body = json.dumps(message_body) if isinstance(message_body, dict) else message_body
+            send_headers = headers or {}
+            self.conn.send(body=body, destination=queue_name, headers=send_headers)
+            logging.info(f"Sent message to queue '{queue_name}' with headers {send_headers}")
+        except Exception as e:
+            logging.error(f"Failed to send message to queue '{queue_name}': {e}")
+
+            # Check for connection errors
+            if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
+                logging.warning("Connection error detected - attempting recovery")
+                self.mq_connected = False
+                time.sleep(1)
+                if self._attempt_reconnect():
+                    try:
+                        self.conn.send(body=body, destination=queue_name, headers=send_headers)
+                        logging.info(f"Message sent successfully after reconnection to queue '{queue_name}'")
+                    except Exception as retry_e:
+                        logging.error(f"Retry failed after reconnection: {retry_e}")
+                else:
+                    logging.error("Reconnection failed - message lost")
+
+    def subscribe_to_queue(self, queue_name, ack_mode='client-individual', prefetch_size=1,
+                          selector=None, subscription_id=None):
+        """
+        Subscribe to a queue with configurable acknowledgment and prefetch.
+        Used for point-to-point messaging in fast processing workflow.
+
+        Args:
+            queue_name: Queue destination (e.g., '/queue/panda.transformer.slices')
+            ack_mode: 'auto', 'client', or 'client-individual' (default: 'client-individual')
+            prefetch_size: Number of messages to prefetch (default: 1, allows small numbers >1)
+            selector: Optional header-based selector (e.g., "task-id = '12345'")
+            subscription_id: Unique subscription ID (auto-generated if None)
+
+        Returns:
+            int: Subscription ID assigned
+
+        Note:
+            - 'client-individual' mode requires manual ack/nack via ack_message()/nack_message()
+            - Unacknowledged messages return to queue on disconnect
+            - prefetch_size=1 ensures worker only receives what it can process immediately
+        """
+        if not self.conn or not self.conn.is_connected():
+            logging.error("Cannot subscribe - not connected to ActiveMQ")
+            return None
+
+        # Generate subscription ID if not provided
+        if subscription_id is None:
+            subscription_id = self._next_subscription_id
+            self._next_subscription_id += 1
+
+        # Build subscription headers
+        headers = {
+            'activemq.prefetchSize': str(prefetch_size)
+        }
+
+        # Add selector for header-based filtering
+        if selector:
+            headers['selector'] = selector
+
+        try:
+            self.conn.subscribe(
+                destination=queue_name,
+                id=subscription_id,
+                ack=ack_mode,
+                headers=headers
+            )
+
+            # Track subscription for reconnection
+            sub_config = {
+                'destination': queue_name,
+                'id': subscription_id,
+                'ack': ack_mode,
+                'headers': headers
+            }
+            self._subscriptions.append(sub_config)
+
+            logging.info(f"Subscribed to queue '{queue_name}' (id={subscription_id}, ack={ack_mode}, "
+                        f"prefetch={prefetch_size}, selector={selector})")
+            return subscription_id
+
+        except Exception as e:
+            logging.error(f"Failed to subscribe to queue '{queue_name}': {e}")
+            return None
+
+    def subscribe_to_topic(self, topic_name, subscription_id=None):
+        """
+        Subscribe to a topic for broadcast messages.
+        Used for control messages that all workers should receive (e.g., run end).
+
+        Args:
+            topic_name: Topic destination (e.g., '/topic/panda.transformer')
+            subscription_id: Unique subscription ID (auto-generated if None)
+
+        Returns:
+            int: Subscription ID assigned
+        """
+        if not self.conn or not self.conn.is_connected():
+            logging.error("Cannot subscribe - not connected to ActiveMQ")
+            return None
+
+        # Generate subscription ID if not provided
+        if subscription_id is None:
+            subscription_id = self._next_subscription_id
+            self._next_subscription_id += 1
+
+        try:
+            self.conn.subscribe(
+                destination=topic_name,
+                id=subscription_id,
+                ack='auto'  # Topics use auto-ack
+            )
+
+            # Track subscription for reconnection
+            sub_config = {
+                'destination': topic_name,
+                'id': subscription_id,
+                'ack': 'auto',
+                'headers': {}
+            }
+            self._subscriptions.append(sub_config)
+
+            logging.info(f"Subscribed to topic '{topic_name}' (id={subscription_id})")
+            return subscription_id
+
+        except Exception as e:
+            logging.error(f"Failed to subscribe to topic '{topic_name}': {e}")
+            return None
+
+    def ack_message(self, frame):
+        """
+        Acknowledge a message in client or client-individual mode.
+        Removes message from queue.
+
+        Args:
+            frame: STOMP message frame received in on_message()
+
+        Note:
+            Call this after successfully processing a message.
+            Only works with ack='client' or ack='client-individual' subscriptions.
+        """
+        try:
+            message_id = frame.headers.get('message-id')
+            subscription_id = frame.headers.get('subscription')
+
+            if not message_id:
+                logging.warning("Cannot ack message - no message-id in frame headers")
+                return
+
+            self.conn.ack(message_id, subscription_id)
+            if self.DEBUG:
+                logging.debug(f"Acknowledged message {message_id} (subscription {subscription_id})")
+
+        except Exception as e:
+            logging.error(f"Failed to acknowledge message: {e}")
+
+    def nack_message(self, frame):
+        """
+        Negative acknowledge a message in client-individual mode.
+        Returns message to queue for redelivery.
+
+        Args:
+            frame: STOMP message frame received in on_message()
+
+        Note:
+            Use this when message processing fails and message should be retried.
+            Only works with ack='client-individual' subscriptions.
+        """
+        try:
+            message_id = frame.headers.get('message-id')
+            subscription_id = frame.headers.get('subscription')
+
+            if not message_id:
+                logging.warning("Cannot nack message - no message-id in frame headers")
+                return
+
+            self.conn.nack(message_id, subscription_id)
+            if self.DEBUG:
+                logging.debug(f"Negative acknowledged message {message_id} (subscription {subscription_id})")
+
+        except Exception as e:
+            logging.error(f"Failed to nack message: {e}")
 
     def _api_request(self, method, endpoint, json_data=None):
         """
