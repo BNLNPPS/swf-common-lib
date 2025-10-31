@@ -25,6 +25,27 @@ def calculate_file_checksum(filepath, algorithm='md5'):
     return hash_func.hexdigest()
 
 # ---
+def get_file_size(file_path):
+    """
+    Returns the size of the file at the given path in bytes.
+    
+    Args:
+        file_path (str): The path to the file.
+    
+    Returns:
+        int: The size of the file in bytes, or None if the file does not exist.
+    """
+
+    file_size_bytes = 0
+    try:
+        file_size_bytes = os.path.getsize(file_path)
+    except:
+        print(f"Error: problem with file '{file_path}'.")
+        exit(-2)
+
+    return file_size_bytes
+
+# ---
 def calculate_adler32_from_file(file_path, chunk_size=4096):
     """
     Calculates the Adler-32 checksum of a file.
