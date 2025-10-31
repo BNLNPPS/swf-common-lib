@@ -29,11 +29,12 @@ class Messenger:
     """
 
     # ---
-    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, verbose=False):
+    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=None, verbose=False):
         self.host       = host
         self.port       = port
         self.username   = username
         self.password   = password
+        self.client_id  = client_id
 
         if(not self.username or not self.password):
             raise ValueError("MQ_USER and MQ_PASSWD environment variables must be set.")
@@ -79,8 +80,8 @@ class Messenger:
 
 ###################################################################
 class Sender(Messenger):
-    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, verbose=False):
-        super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, verbose=verbose)
+    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=None, verbose=False):
+        super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=client_id, verbose=verbose)
 
 
     # ---
@@ -129,8 +130,8 @@ class Listener(stomp.ConnectionListener):
 # It inherits the connection and disconnection methods from Messenger and can be extended to add more functionality.
 
 class Receiver(Messenger):
-    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, verbose=False, processor=None):
-        super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, verbose=verbose)
+    def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=None, verbose=False, processor=None):
+        super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=client_id, verbose=verbose)
         self.processor = processor
 
     # ---
