@@ -34,3 +34,8 @@ a set defined as follows:
         'stf_gen', 'data_ready'
     }
 ```
+
+## Subscription
+
+For the _Receiver_ class, it's important to create a unique subscription for
+reliable delivery of messages. This is done via the argument *client_id*.
