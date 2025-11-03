@@ -3,11 +3,7 @@
 # It is designed to facilitate communication in the ePIC streaming testbed system.
 # It uses the `stomp.py` library for communication with the ActiveMQ server.
 
-import os
-import sys
-import stomp
-import ssl
-import time
+import os, sys, stomp, ssl, time
 
 ###################################################################
 mq_user     = os.environ.get('MQ_USER',     None) # this will fail if not set
@@ -133,6 +129,7 @@ class Receiver(Messenger):
     def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=None, verbose=False, processor=None):
         super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=client_id, verbose=verbose)
         self.processor = processor
+        # self.client_id = client_id - should be done in the base.
 
     # ---
     def connect(self):
@@ -143,23 +140,19 @@ class Receiver(Messenger):
         # self.conn.set_listener('debug', stomp.PrintingListener())
         # Connect with a durable client-id
         try:
-            self.conn.connect(login=self.username, passcode=self.password, wait=True, version='1.2', headers={'client-id': 'sub-test-001'})
+            self.conn.connect(login=self.username, passcode=self.password, wait=True, version='1.2', headers={'client-id': self.client_id})
             if self.conn.is_connected():
-                if self.verbose:
-                    print("*** Receiver connected to MQ server at {}:{} ***".format(self.host, self.port))
+                if self.verbose: print("*** Receiver connected to MQ server at {}:{} ***".format(self.host, self.port))
             else:
-                if self.verbose:
-                    print("*** Receiver not connected to MQ server at {}:{} ***".format(self.host, self.port))
+                if self.verbose: print("*** Receiver not connected to MQ server at {}:{} ***".format(self.host, self.port))
         except Exception as e:
             print("Receiver connection failed:", type(e).__name__, e)
-
-
 
         # Subscribe with durable subscription name
         self.conn.subscribe(
             destination='epictopic',
-            id='sub-test-001',
+            id=1,
             ack='auto',
-            headers={'activemq.subscriptionName': 'test-durable-sub'}
+            headers={'activemq.subscriptionName': self.client_id}
             )
 
