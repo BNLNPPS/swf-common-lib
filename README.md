@@ -4,8 +4,8 @@ Common libraries and utilities for the swf-testbed ePIC streaming workflow testb
 
 ## Overview
 
-This library provides shared functionality for SWF agents, including logging utilities and REST API integration for the swf-monitor service.
-Also included are utility classes wrapping MQ and Rucio communications.
+This library provides shared functionality for SWF agents, including logging utilities and REST API
+integration for the swf-monitor service. Also included are utility classes wrapping MQ and Rucio communications.
 
 ## Installation
 
@@ -86,3 +86,9 @@ When the monitor service is available, logs are sent to the database via REST AP
 ### Logging Utils (`swf_common_lib.logging_utils`)
 
 Traditional logging utilities for PostgreSQL database integration.
+
+## MQ and Rucio Utility packages
+
+The *mq_comms* and *rucio_comms* packages provide convenient encapsulation of interactions
+with the ActiveMQ and Rucio systems, respectively. Each folder contains it's own README file
+with more details.
