@@ -13,6 +13,8 @@ mq_port     = int(os.environ.get('MQ_PORT', 61612))
 
 mq_host     = os.environ.get('MQ_HOST',     'pandaserver02.sdcc.bnl.gov')
 mq_cafile   = os.environ.get('MQ_CAFILE',   '')
+
+mq_subscription_name = os.environ.get('MQ_SUBSCRIPTION_NAME', 'epic_streaming_testbed')
 ###################################################################
 class Messenger:
     """
@@ -130,6 +132,8 @@ class Receiver(Messenger):
         super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=client_id, verbose=verbose)
         self.processor = processor
         # self.client_id = client_id - should be done in the base.
+        if self.verbose:
+            print(f"Initializing Receiver with host={self.host}, port={self.port}, username={self.username}, client_id={self.client_id}")
 
     # ---
     def connect(self):
@@ -153,6 +157,9 @@ class Receiver(Messenger):
             destination='epictopic',
             id=1,
             ack='auto',
-            headers={'activemq.subscriptionName': self.client_id}
+            headers={
+                'activemq.subscriptionName': mq_subscription_name,
+                'client-id': self.client_id
+                }
             )
 
