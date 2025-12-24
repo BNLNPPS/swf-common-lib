@@ -15,6 +15,9 @@ mq_host     = os.environ.get('MQ_HOST',     'pandaserver02.sdcc.bnl.gov')
 mq_cafile   = os.environ.get('MQ_CAFILE',   '')
 
 mq_subscription_name = os.environ.get('MQ_SUBSCRIPTION_NAME', 'epic_streaming_testbed')
+mq_topic    = os.environ.get('MQ_TOPIC',    'epictopic')
+
+
 ###################################################################
 class Messenger:
     """
@@ -80,7 +83,8 @@ class Messenger:
 class Sender(Messenger):
     def __init__(self, host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=None, verbose=False):
         super().__init__(host=mq_host, port=mq_port, username=mq_user, password=mq_passwd, client_id=client_id, verbose=verbose)
-
+        if self.verbose:
+            print(f"*** Initializing Sender with topic={mq_topic} ***")
 
     # ---
     def connect(self):
@@ -97,7 +101,7 @@ class Sender(Messenger):
             print("Sender connection failed:", type(e).__name__, e)
 
     # ---
-    def send(self, destination='epictopic', body='heartbeat', headers={'persistent': 'true'}):
+    def send(self, destination=mq_topic, body='heartbeat', headers={'persistent': 'true'}):
         self.conn.send(destination=destination, body=body, headers=headers)
 
 ###################################################################
@@ -133,7 +137,7 @@ class Receiver(Messenger):
         self.processor = processor
         # self.client_id = client_id - should be done in the base.
         if self.verbose:
-            print(f"Initializing Receiver with host={self.host}, port={self.port}, username={self.username}, client_id={self.client_id}")
+            print(f"*** Initializing Receiver with host={self.host}, port={self.port}, username={self.username}, client_id={self.client_id}, topic={mq_topic} ***")
 
     # ---
     def connect(self):
@@ -146,7 +150,7 @@ class Receiver(Messenger):
         try:
             self.conn.connect(login=self.username, passcode=self.password, wait=True, version='1.2', headers={'client-id': self.client_id})
             if self.conn.is_connected():
-                if self.verbose: print("*** Receiver connected to MQ server at {}:{} ***".format(self.host, self.port))
+                if self.verbose: print("*** Receiver connected to MQ server at {}:{}, topic {} ***".format(self.host, self.port, mq_topic))
             else:
                 if self.verbose: print("*** Receiver not connected to MQ server at {}:{} ***".format(self.host, self.port))
         except Exception as e:
@@ -154,7 +158,7 @@ class Receiver(Messenger):
 
         # Subscribe with durable subscription name
         self.conn.subscribe(
-            destination='epictopic',
+            destination=mq_topic,
             id=1,
             ack='auto',
             headers={
