@@ -10,7 +10,9 @@ import requests
 import json
 import logging
 from pathlib import Path
+from typing import Optional
 from .api_utils import get_next_agent_id
+from .config_utils import load_testbed_config, TestbedConfigError
 
 
 class APIError(Exception):
@@ -111,10 +113,31 @@ class BaseAgent(stomp.ConnectionListener):
         'stf_gen', 'data_ready'
     }
 
-    def __init__(self, agent_type, subscription_queue, debug=False):
+    def __init__(self, agent_type, subscription_queue, debug=False,
+                 config_path: Optional[str] = None):
+        """
+        Initialize BaseAgent.
+
+        Args:
+            agent_type: Type of agent (e.g., 'DATA', 'PROCESSING')
+            subscription_queue: ActiveMQ queue/topic to subscribe to
+            debug: Enable debug logging
+            config_path: Path to testbed.toml config file
+        """
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
+
+        # Load testbed configuration (namespace) if config path provided
+        self.namespace = None
+        if config_path:
+            try:
+                config = load_testbed_config(config_path=config_path)
+                self.namespace = config.namespace
+                logging.info(f"Namespace: {self.namespace}")
+            except TestbedConfigError as e:
+                logging.error(f"Configuration error: {e}")
+                raise
 
         # Configuration from environment variables (needed for agent ID API call)
         self.monitor_url = os.getenv('SWF_MONITOR_URL').rstrip('/')
@@ -305,15 +328,20 @@ class BaseAgent(stomp.ConnectionListener):
 
     def log_received_message(self, frame, known_types=None):
         """
-        Helper method to log received messages with type information.
+        Helper method to log received messages with type information and namespace filtering.
         Agents can call this at the start of their on_message method.
+
+        Namespace filtering:
+        - If agent has namespace AND message has different namespace → returns (None, None)
+        - If message has no namespace → processes it (backward compat)
+        - If agent has no namespace → processes all messages (backward compat)
 
         Args:
             frame: The STOMP message frame
             known_types: Optional set/list of known message types (defaults to WORKFLOW_MESSAGE_TYPES)
 
         Returns:
-            tuple: (message_data, msg_type) for convenience
+            tuple: (message_data, msg_type) for convenience, or (None, None) if filtered
 
         Raises:
             RuntimeError: If message parsing fails
@@ -322,9 +350,16 @@ class BaseAgent(stomp.ConnectionListener):
             known_types = self.WORKFLOW_MESSAGE_TYPES
 
         try:
-            import json
             message_data = json.loads(frame.body)
             msg_type = message_data.get('msg_type', 'unknown')
+
+            # Namespace filtering
+            msg_namespace = message_data.get('namespace')
+            if self.namespace and msg_namespace and msg_namespace != self.namespace:
+                logging.debug(
+                    f"Ignoring message from namespace '{msg_namespace}' (ours: '{self.namespace}')"
+                )
+                return None, None
 
             if msg_type not in known_types:
                 logging.info(f"{self.agent_type} agent received unknown message type: {msg_type}", extra={"msg_type": msg_type})
@@ -343,7 +378,14 @@ class BaseAgent(stomp.ConnectionListener):
     def send_message(self, destination, message_body):
         """
         Sends a JSON message to a specific destination.
+
+        Auto-injects 'sender' (agent_name) and 'namespace' (if configured) into message.
         """
+        # Auto-inject sender and namespace
+        message_body['sender'] = self.agent_name
+        if self.namespace:
+            message_body['namespace'] = self.namespace
+
         try:
             self.conn.send(body=json.dumps(message_body), destination=destination)
             logging.info(f"Sent message to '{destination}': {message_body}")
