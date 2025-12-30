@@ -213,26 +213,38 @@ class BaseAgent(stomp.ConnectionListener):
         Connects to the message broker and runs the agent's main loop.
         """
         logging.info(f"Starting {self.agent_name}...")
-        logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} with user '{self.mq_user}'")
-        
+
         # Track MQ connection status
         self.mq_connected = False
-        
-        try:
-            logging.debug("Attempting STOMP connection with version 1.1...")
-            # Use STOMP version 1.1 with client-id and longer heartbeat for development
-            self.conn.connect(
-                self.mq_user, 
-                self.mq_password, 
-                wait=True, 
-                version='1.1',
-                headers={
-                    'client-id': self.agent_name,
-                    'heart-beat': '30000,30000'  # Send heartbeat every 30sec, expect server every 30sec
-                }
-            )
-            self.mq_connected = True
 
+        # Initial connection with retry
+        max_retries = 3
+        retry_delay = 5
+        for attempt in range(1, max_retries + 1):
+            logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
+            try:
+                self.conn.connect(
+                    self.mq_user,
+                    self.mq_password,
+                    wait=True,
+                    version='1.1',
+                    headers={
+                        'client-id': self.agent_name,
+                        'heart-beat': '30000,30000'
+                    }
+                )
+                self.mq_connected = True
+                break
+            except Exception as e:
+                logging.warning(f"Connection attempt {attempt} failed: {e}")
+                if attempt < max_retries:
+                    logging.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logging.error(f"Failed to connect after {max_retries} attempts")
+                    raise
+
+        try:
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
             
