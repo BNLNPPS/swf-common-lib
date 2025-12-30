@@ -471,7 +471,11 @@ class BaseAgent(stomp.ConnectionListener):
             "description": description,
             "mq_connected": getattr(self, 'mq_connected', False)  # Include MQ status in payload
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             if self.DEBUG:
@@ -509,7 +513,11 @@ class BaseAgent(stomp.ConnectionListener):
             "current_stf_count": workflow_metadata.get('active_tasks', 0) if workflow_metadata else 0,
             "total_stf_processed": workflow_metadata.get('completed_tasks', 0) if workflow_metadata else 0
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             if self.DEBUG:
@@ -518,7 +526,7 @@ class BaseAgent(stomp.ConnectionListener):
         else:
             logging.warning("Failed to send heartbeat to monitor")
             return False
-    
+
     def report_agent_status(self, status, message=None, error_details=None):
         """Report agent status change to monitor."""
         logging.info(f"Reporting agent status: {status}")
@@ -536,7 +544,11 @@ class BaseAgent(stomp.ConnectionListener):
             "description": ". ".join(description_parts),
             "mq_connected": getattr(self, 'mq_connected', False)
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             logging.info(f"Status reported successfully: {status}")
@@ -544,7 +556,7 @@ class BaseAgent(stomp.ConnectionListener):
         else:
             logging.warning(f"Failed to report status: {status}")
             return False
-    
+
     def check_monitor_health(self):
         """Check if monitor API is available."""
         try:
