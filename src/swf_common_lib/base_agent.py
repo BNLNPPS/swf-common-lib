@@ -10,7 +10,9 @@ import requests
 import json
 import logging
 from pathlib import Path
+from typing import Optional
 from .api_utils import get_next_agent_id
+from .config_utils import load_testbed_config, TestbedConfigError
 
 
 class APIError(Exception):
@@ -51,8 +53,13 @@ def setup_environment():
                     if line.startswith('export '):
                         line = line[7:]  # Remove 'export '
                     key, value = line.split('=', 1)
-                    os.environ[key] = value.strip('"\'')
-    
+                    value = value.strip('"\'')
+                    # Skip entries with unexpanded shell variables (e.g., PATH=$PATH:...)
+                    # These are already expanded by shell when it sourced ~/.env
+                    if '$' in value:
+                        continue
+                    os.environ[key] = value
+
     # Unset proxy variables to prevent localhost routing through proxy
     for proxy_var in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']:
         if proxy_var in os.environ:
@@ -111,13 +118,34 @@ class BaseAgent(stomp.ConnectionListener):
         'stf_gen', 'data_ready'
     }
 
-    def __init__(self, agent_type, subscription_queue, debug=False):
+    def __init__(self, agent_type, subscription_queue, debug=False,
+                 config_path: Optional[str] = None):
+        """
+        Initialize BaseAgent.
+
+        Args:
+            agent_type: Type of agent (e.g., 'DATA', 'PROCESSING')
+            subscription_queue: ActiveMQ queue/topic to subscribe to
+            debug: Enable debug logging
+            config_path: Path to testbed.toml config file
+        """
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
 
+        # Load testbed configuration (namespace) if config path provided
+        self.namespace = None
+        if config_path:
+            try:
+                config = load_testbed_config(config_path=config_path)
+                self.namespace = config.namespace
+                logging.info(f"Namespace: {self.namespace}")
+            except TestbedConfigError as e:
+                logging.error(f"Configuration error: {e}")
+                raise
+
         # Configuration from environment variables (needed for agent ID API call)
-        self.monitor_url = os.getenv('SWF_MONITOR_URL').rstrip('/')
+        self.monitor_url = (os.getenv('SWF_MONITOR_URL') or '').rstrip('/')
         self.api_token = os.getenv('SWF_API_TOKEN')
 
         # Set up API session (needed for agent ID call)
@@ -132,7 +160,7 @@ class BaseAgent(stomp.ConnectionListener):
         agent_id = self.get_next_agent_id()
         self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
         # Use HTTP URL for REST logging (no auth required)
-        self.base_url = os.getenv('SWF_MONITOR_HTTP_URL').rstrip('/')
+        self.base_url = (os.getenv('SWF_MONITOR_HTTP_URL') or '').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
         self.mq_port = int(os.getenv('ACTIVEMQ_PORT', 61612))  # STOMP port for Artemis on this system
         self.mq_user = os.getenv('ACTIVEMQ_USER', 'admin')
@@ -179,8 +207,8 @@ class BaseAgent(stomp.ConnectionListener):
             self.api.verify = False
             # Disable proxy for localhost connections
             self.api.proxies = {
-                'http': None,
-                'https': None
+                'http': '',
+                'https': ''
             }
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -190,26 +218,38 @@ class BaseAgent(stomp.ConnectionListener):
         Connects to the message broker and runs the agent's main loop.
         """
         logging.info(f"Starting {self.agent_name}...")
-        logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} with user '{self.mq_user}'")
-        
+
         # Track MQ connection status
         self.mq_connected = False
-        
-        try:
-            logging.debug("Attempting STOMP connection with version 1.1...")
-            # Use STOMP version 1.1 with client-id and longer heartbeat for development
-            self.conn.connect(
-                self.mq_user, 
-                self.mq_password, 
-                wait=True, 
-                version='1.1',
-                headers={
-                    'client-id': self.agent_name,
-                    'heart-beat': '30000,30000'  # Send heartbeat every 30sec, expect server every 30sec
-                }
-            )
-            self.mq_connected = True
 
+        # Initial connection with retry
+        max_retries = 3
+        retry_delay = 5
+        for attempt in range(1, max_retries + 1):
+            logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
+            try:
+                self.conn.connect(
+                    self.mq_user,
+                    self.mq_password,
+                    wait=True,
+                    version='1.1',
+                    headers={
+                        'client-id': self.agent_name,
+                        'heart-beat': '30000,30000'
+                    }
+                )
+                self.mq_connected = True
+                break
+            except Exception as e:
+                logging.warning(f"Connection attempt {attempt} failed: {e}")
+                if attempt < max_retries:
+                    logging.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logging.error(f"Failed to connect after {max_retries} attempts")
+                    raise
+
+        try:
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
             
@@ -305,15 +345,20 @@ class BaseAgent(stomp.ConnectionListener):
 
     def log_received_message(self, frame, known_types=None):
         """
-        Helper method to log received messages with type information.
+        Helper method to log received messages with type information and namespace filtering.
         Agents can call this at the start of their on_message method.
+
+        Namespace filtering:
+        - If agent has namespace AND message has different namespace → returns (None, None)
+        - If message has no namespace → processes it (backward compat)
+        - If agent has no namespace → processes all messages (backward compat)
 
         Args:
             frame: The STOMP message frame
             known_types: Optional set/list of known message types (defaults to WORKFLOW_MESSAGE_TYPES)
 
         Returns:
-            tuple: (message_data, msg_type) for convenience
+            tuple: (message_data, msg_type) for convenience, or (None, None) if filtered
 
         Raises:
             RuntimeError: If message parsing fails
@@ -322,9 +367,16 @@ class BaseAgent(stomp.ConnectionListener):
             known_types = self.WORKFLOW_MESSAGE_TYPES
 
         try:
-            import json
             message_data = json.loads(frame.body)
             msg_type = message_data.get('msg_type', 'unknown')
+
+            # Namespace filtering
+            msg_namespace = message_data.get('namespace')
+            if self.namespace and msg_namespace and msg_namespace != self.namespace:
+                logging.debug(
+                    f"Ignoring message from namespace '{msg_namespace}' (ours: '{self.namespace}')"
+                )
+                return None, None
 
             if msg_type not in known_types:
                 logging.info(f"{self.agent_type} agent received unknown message type: {msg_type}", extra={"msg_type": msg_type})
@@ -343,7 +395,14 @@ class BaseAgent(stomp.ConnectionListener):
     def send_message(self, destination, message_body):
         """
         Sends a JSON message to a specific destination.
+
+        Auto-injects 'sender' (agent_name) and 'namespace' (if configured) into message.
         """
+        # Auto-inject sender and namespace
+        message_body['sender'] = self.agent_name
+        if self.namespace:
+            message_body['namespace'] = self.namespace
+
         try:
             self.conn.send(body=json.dumps(message_body), destination=destination)
             logging.info(f"Sent message to '{destination}': {message_body}")
@@ -417,7 +476,11 @@ class BaseAgent(stomp.ConnectionListener):
             "description": description,
             "mq_connected": getattr(self, 'mq_connected', False)  # Include MQ status in payload
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             if self.DEBUG:
@@ -455,7 +518,11 @@ class BaseAgent(stomp.ConnectionListener):
             "current_stf_count": workflow_metadata.get('active_tasks', 0) if workflow_metadata else 0,
             "total_stf_processed": workflow_metadata.get('completed_tasks', 0) if workflow_metadata else 0
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             if self.DEBUG:
@@ -464,7 +531,7 @@ class BaseAgent(stomp.ConnectionListener):
         else:
             logging.warning("Failed to send heartbeat to monitor")
             return False
-    
+
     def report_agent_status(self, status, message=None, error_details=None):
         """Report agent status change to monitor."""
         logging.info(f"Reporting agent status: {status}")
@@ -482,7 +549,11 @@ class BaseAgent(stomp.ConnectionListener):
             "description": ". ".join(description_parts),
             "mq_connected": getattr(self, 'mq_connected', False)
         }
-        
+
+        # Include namespace if configured
+        if self.namespace:
+            payload["namespace"] = self.namespace
+
         result = self._api_request('post', '/systemagents/heartbeat/', payload)
         if result:
             logging.info(f"Status reported successfully: {status}")
@@ -490,7 +561,7 @@ class BaseAgent(stomp.ConnectionListener):
         else:
             logging.warning(f"Failed to report status: {status}")
             return False
-    
+
     def check_monitor_health(self):
         """Check if monitor API is available."""
         try:

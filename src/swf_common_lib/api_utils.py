@@ -78,3 +78,47 @@ def get_next_run_number(monitor_url, api_session, logger=None):
     except Exception as e:
         logger.error(f"Failed to get next run number from API: {e}")
         raise RuntimeError(f"Critical failure getting run number: {e}") from e
+
+
+def ensure_namespace(monitor_url, api_session, name, owner=None, logger=None):
+    """
+    Ensure a namespace exists in the database, creating it if not.
+
+    Args:
+        monitor_url (str): Base URL of the swf-monitor service
+        api_session (requests.Session): Configured session with auth headers
+        name (str): Namespace name
+        owner (str, optional): Owner username, defaults to current user
+        logger (logging.Logger, optional): Logger for output
+
+    Returns:
+        dict: Namespace info with keys: name, owner, description, created (bool)
+
+    Raises:
+        RuntimeError: If API call fails or returns error
+    """
+    import os
+
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    if owner is None:
+        owner = os.getenv('USER', 'unknown')
+
+    try:
+        url = f"{monitor_url}/api/namespaces/ensure/"
+        payload = {'name': name, 'owner': owner}
+        response = api_session.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        if data.get('status') == 'success':
+            if data.get('created'):
+                logger.info(f"Created namespace '{name}' with owner '{owner}'")
+            return data
+        else:
+            raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
+
+    except Exception as e:
+        logger.warning(f"Failed to ensure namespace '{name}': {e}")
+        raise
