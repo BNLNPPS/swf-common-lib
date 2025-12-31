@@ -145,7 +145,7 @@ class BaseAgent(stomp.ConnectionListener):
                 raise
 
         # Configuration from environment variables (needed for agent ID API call)
-        self.monitor_url = os.getenv('SWF_MONITOR_URL').rstrip('/')
+        self.monitor_url = (os.getenv('SWF_MONITOR_URL') or '').rstrip('/')
         self.api_token = os.getenv('SWF_API_TOKEN')
 
         # Set up API session (needed for agent ID call)
@@ -160,7 +160,7 @@ class BaseAgent(stomp.ConnectionListener):
         agent_id = self.get_next_agent_id()
         self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
         # Use HTTP URL for REST logging (no auth required)
-        self.base_url = os.getenv('SWF_MONITOR_HTTP_URL').rstrip('/')
+        self.base_url = (os.getenv('SWF_MONITOR_HTTP_URL') or '').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
         self.mq_port = int(os.getenv('ACTIVEMQ_PORT', 61612))  # STOMP port for Artemis on this system
         self.mq_user = os.getenv('ACTIVEMQ_USER', 'admin')
@@ -207,8 +207,8 @@ class BaseAgent(stomp.ConnectionListener):
             self.api.verify = False
             # Disable proxy for localhost connections
             self.api.proxies = {
-                'http': None,
-                'https': None
+                'http': '',
+                'https': ''
             }
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
