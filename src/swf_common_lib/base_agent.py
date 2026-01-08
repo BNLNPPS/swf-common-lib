@@ -281,6 +281,12 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
+            # Report exit status before disconnecting
+            try:
+                self.report_agent_status("EXITED", "Agent shutdown")
+            except Exception as e:
+                logging.warning(f"Failed to report exit status: {e}")
+
             if self.conn and self.conn.is_connected():
                 self.conn.disconnect()
                 self.mq_connected = False
@@ -397,11 +403,18 @@ class BaseAgent(stomp.ConnectionListener):
         Sends a JSON message to a specific destination.
 
         Auto-injects 'sender' (agent_name) and 'namespace' (if configured) into message.
+        Warns if namespace is not configured - messages without namespace cannot be
+        filtered by namespace-aware agents.
         """
         # Auto-inject sender and namespace
         message_body['sender'] = self.agent_name
         if self.namespace:
             message_body['namespace'] = self.namespace
+        else:
+            logging.warning(
+                f"Sending message without namespace (msg_type={message_body.get('msg_type', 'unknown')}). "
+                "Configure namespace in testbed.toml to enable namespace filtering."
+            )
 
         try:
             self.conn.send(body=json.dumps(message_body), destination=destination)
