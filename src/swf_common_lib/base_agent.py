@@ -281,6 +281,12 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
+            # Report exit status before disconnecting
+            try:
+                self.report_agent_status("EXITED", "Agent shutdown")
+            except Exception as e:
+                logging.warning(f"Failed to report exit status: {e}")
+
             if self.conn and self.conn.is_connected():
                 self.conn.disconnect()
                 self.mq_connected = False
