@@ -5,6 +5,7 @@ This module contains the base class for all agents.
 import os
 import sys
 import time
+import socket
 import stomp
 import requests
 import json
@@ -159,6 +160,12 @@ class BaseAgent(stomp.ConnectionListener):
         username = getpass.getuser()
         agent_id = self.get_next_agent_id()
         self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
+
+        # Process identification for agent management
+        self.pid = os.getpid()
+        self.hostname = socket.gethostname()
+        self.operational_state = 'STARTING'  # STARTING, READY, PROCESSING, EXITED
+
         # Use HTTP URL for REST logging (no auth required)
         self.base_url = (os.getenv('SWF_MONITOR_HTTP_URL') or '').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
@@ -252,10 +259,13 @@ class BaseAgent(stomp.ConnectionListener):
         try:
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
-            
+
             # Register as subscriber in monitor
             self.register_subscriber()
-            
+
+            # Agent is now ready and waiting for work
+            self.operational_state = 'READY'
+
             # Initial registration/heartbeat
             self.send_heartbeat()
 
@@ -283,6 +293,7 @@ class BaseAgent(stomp.ConnectionListener):
         finally:
             # Report exit status before disconnecting
             try:
+                self.operational_state = 'EXITED'
                 self.report_agent_status("EXITED", "Agent shutdown")
             except Exception as e:
                 logging.warning(f"Failed to report exit status: {e}")
@@ -487,7 +498,10 @@ class BaseAgent(stomp.ConnectionListener):
             "agent_type": self.agent_type,
             "status": status,
             "description": description,
-            "mq_connected": getattr(self, 'mq_connected', False)  # Include MQ status in payload
+            "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
         }
 
         # Include namespace if configured
@@ -526,6 +540,9 @@ class BaseAgent(stomp.ConnectionListener):
             "status": status,
             "description": description,
             "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
             # Include workflow metadata in agent record
             "workflow_enabled": True if workflow_metadata else False,
             "current_stf_count": workflow_metadata.get('active_tasks', 0) if workflow_metadata else 0,
@@ -548,19 +565,22 @@ class BaseAgent(stomp.ConnectionListener):
     def report_agent_status(self, status, message=None, error_details=None):
         """Report agent status change to monitor."""
         logging.info(f"Reporting agent status: {status}")
-        
+
         description_parts = [f"{self.agent_type} agent"]
         if message:
             description_parts.append(message)
         if error_details:
             description_parts.append(f"Error: {error_details}")
-        
+
         payload = {
             "instance_name": self.agent_name,
             "agent_type": self.agent_type,
             "status": status,
             "description": ". ".join(description_parts),
-            "mq_connected": getattr(self, 'mq_connected', False)
+            "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
         }
 
         # Include namespace if configured
