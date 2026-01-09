@@ -226,35 +226,33 @@ class BaseAgent(stomp.ConnectionListener):
         """
         logging.info(f"Starting {self.agent_name}...")
 
-        # Track MQ connection status
-        self.mq_connected = False
-
-        # Initial connection with retry
-        max_retries = 3
-        retry_delay = 5
-        for attempt in range(1, max_retries + 1):
-            logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
-            try:
-                self.conn.connect(
-                    self.mq_user,
-                    self.mq_password,
-                    wait=True,
-                    version='1.1',
-                    headers={
-                        'client-id': self.agent_name,
-                        'heart-beat': '30000,30000'
-                    }
-                )
-                self.mq_connected = True
-                break
-            except Exception as e:
-                logging.warning(f"Connection attempt {attempt} failed: {e}")
-                if attempt < max_retries:
-                    logging.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                else:
-                    logging.error(f"Failed to connect after {max_retries} attempts")
-                    raise
+        # Connect if not already connected (some subclasses connect in __init__)
+        if not getattr(self, 'mq_connected', False):
+            max_retries = 3
+            retry_delay = 5
+            for attempt in range(1, max_retries + 1):
+                logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
+                try:
+                    self.conn.connect(
+                        self.mq_user,
+                        self.mq_password,
+                        wait=True,
+                        version='1.1',
+                        headers={
+                            'client-id': self.agent_name,
+                            'heart-beat': '30000,30000'
+                        }
+                    )
+                    self.mq_connected = True
+                    break
+                except Exception as e:
+                    logging.warning(f"Connection attempt {attempt} failed: {e}")
+                    if attempt < max_retries:
+                        logging.info(f"Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        logging.error(f"Failed to connect after {max_retries} attempts")
+                        raise
 
         try:
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
@@ -264,7 +262,7 @@ class BaseAgent(stomp.ConnectionListener):
             self.register_subscriber()
 
             # Agent is now ready and waiting for work
-            self.operational_state = 'READY'
+            self.set_ready()
 
             # Initial registration/heartbeat
             self.send_heartbeat()
@@ -404,6 +402,73 @@ class BaseAgent(stomp.ConnectionListener):
         except json.JSONDecodeError as e:
             logging.error(f"CRITICAL: Failed to parse message JSON: {e}")
             raise RuntimeError(f"Message parsing failed - agent cannot continue: {e}") from e
+
+    # -------------------------------------------------------------------------
+    # Processing State API
+    # -------------------------------------------------------------------------
+
+    def set_processing(self):
+        """
+        Declare that the agent is actively doing work.
+
+        Call this when the agent begins a unit of work (which may span multiple
+        messages). The agent will report PROCESSING state in heartbeats until
+        set_ready() is called.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'start_run':
+                    self.set_processing()
+                    # ... do work ...
+        """
+        self.operational_state = 'PROCESSING'
+        logging.info(f"{self.agent_name} state -> PROCESSING")
+
+    def set_ready(self):
+        """
+        Declare that the agent is idle, waiting for work.
+
+        Call this when a unit of work is complete and the agent is ready
+        to receive new work.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'end_run':
+                    # ... finalize work ...
+                    self.set_ready()
+        """
+        self.operational_state = 'READY'
+        logging.info(f"{self.agent_name} state -> READY")
+
+    def processing(self):
+        """
+        Context manager for bounded processing work.
+
+        Use this when a unit of work is contained within a single code block.
+        Automatically sets PROCESSING on entry and READY on exit.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'process_stf':
+                    with self.processing():
+                        # ... do bounded work ...
+                    # automatically back to READY
+        """
+        agent = self
+
+        class ProcessingContext:
+            def __enter__(self):
+                agent.set_processing()
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                agent.set_ready()
+                return False  # Don't suppress exceptions
+
+        return ProcessingContext()
 
     def get_next_agent_id(self):
         """Get the next agent ID from persistent state API."""
