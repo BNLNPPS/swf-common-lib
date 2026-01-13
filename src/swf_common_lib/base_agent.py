@@ -126,10 +126,22 @@ class BaseAgent(stomp.ConnectionListener):
 
         Args:
             agent_type: Type of agent (e.g., 'DATA', 'PROCESSING')
-            subscription_queue: ActiveMQ queue/topic to subscribe to
+            subscription_queue: ActiveMQ destination with explicit prefix.
+                Must start with '/queue/' (anycast) or '/topic/' (multicast).
+                Example: '/queue/workflow_control' or '/topic/epictopic'
             debug: Enable debug logging
             config_path: Path to testbed.toml config file
+
+        Raises:
+            ValueError: If subscription_queue doesn't have /queue/ or /topic/ prefix
         """
+        # Validate destination has explicit prefix (required for Artemis routing)
+        if not subscription_queue.startswith('/queue/') and not subscription_queue.startswith('/topic/'):
+            raise ValueError(
+                f"subscription_queue must start with '/queue/' or '/topic/', got: '{subscription_queue}'. "
+                f"Use '/queue/{subscription_queue}' for anycast or '/topic/{subscription_queue}' for multicast."
+            )
+
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
@@ -478,10 +490,21 @@ class BaseAgent(stomp.ConnectionListener):
         """
         Sends a JSON message to a specific destination.
 
-        Auto-injects 'sender' (agent_name) and 'namespace' (if configured) into message.
-        Warns if namespace is not configured - messages without namespace cannot be
-        filtered by namespace-aware agents.
+        Args:
+            destination: ActiveMQ destination with explicit prefix.
+                Must start with '/queue/' (anycast) or '/topic/' (multicast).
+            message_body: Dict to send as JSON. 'sender' and 'namespace' auto-injected.
+
+        Raises:
+            ValueError: If destination doesn't have /queue/ or /topic/ prefix
         """
+        # Validate destination has explicit prefix
+        if not destination.startswith('/queue/') and not destination.startswith('/topic/'):
+            raise ValueError(
+                f"destination must start with '/queue/' or '/topic/', got: '{destination}'. "
+                f"Use '/queue/{destination}' for anycast or '/topic/{destination}' for multicast."
+            )
+
         # Auto-inject sender and namespace
         message_body['sender'] = self.agent_name
         if self.namespace:
