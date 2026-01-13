@@ -175,8 +175,25 @@ class BaseAgent(stomp.ConnectionListener):
         # Set up centralized REST logging
         self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
 
-        # Create connection with proper heartbeat configuration
-        self.conn = stomp.Connection(
+        # Sender connection (no listener)
+        self.conn = self._create_connection(with_listener=False)
+    
+        # Receiver connection (listener enabled)
+        self.recv_conn = self._create_connection(with_listener=True)
+        
+        # For localhost development, disable SSL verification and proxy
+        if 'localhost' in self.monitor_url or '127.0.0.1' in self.monitor_url:
+            self.api.verify = False
+            # Disable proxy for localhost connections
+            self.api.proxies = {
+                'http': '',
+                'https': ''
+            }
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _create_connection(self, with_listener=False):
+        conn = stomp.Connection(
             host_and_ports=[(self.mq_host, self.mq_port)],
             vhost=self.mq_host,
             try_loopback_connect=False,
@@ -191,7 +208,7 @@ class BaseAgent(stomp.ConnectionListener):
             
             if self.ssl_ca_certs:
                 # Configure SSL transport
-                self.conn.transport.set_ssl(
+                conn.transport.set_ssl(
                     for_hosts=[(self.mq_host, self.mq_port)],
                     ca_certs=self.ssl_ca_certs,
                     ssl_version=ssl.PROTOCOL_TLS_CLIENT
@@ -199,20 +216,12 @@ class BaseAgent(stomp.ConnectionListener):
                 logging.info("SSL transport configured successfully")
             else:
                 logging.warning("SSL enabled but no CA certificate file specified")
-        
-        self.conn.set_listener('', self)
-        
-        # For localhost development, disable SSL verification and proxy
-        if 'localhost' in self.monitor_url or '127.0.0.1' in self.monitor_url:
-            self.api.verify = False
-            # Disable proxy for localhost connections
-            self.api.proxies = {
-                'http': '',
-                'https': ''
-            }
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+        if with_listener:
+            conn.set_listener('', self)
+
+        return conn
+    
     def run(self):
         """
         Connects to the message broker and runs the agent's main loop.
