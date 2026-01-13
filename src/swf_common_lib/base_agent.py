@@ -5,6 +5,7 @@ This module contains the base class for all agents.
 import os
 import sys
 import time
+import socket
 import stomp
 import requests
 import json
@@ -125,10 +126,22 @@ class BaseAgent(stomp.ConnectionListener):
 
         Args:
             agent_type: Type of agent (e.g., 'DATA', 'PROCESSING')
-            subscription_queue: ActiveMQ queue/topic to subscribe to
+            subscription_queue: ActiveMQ destination with explicit prefix.
+                Must start with '/queue/' (anycast) or '/topic/' (multicast).
+                Example: '/queue/workflow_control' or '/topic/epictopic'
             debug: Enable debug logging
             config_path: Path to testbed.toml config file
+
+        Raises:
+            ValueError: If subscription_queue doesn't have /queue/ or /topic/ prefix
         """
+        # Validate destination has explicit prefix (required for Artemis routing)
+        if not subscription_queue.startswith('/queue/') and not subscription_queue.startswith('/topic/'):
+            raise ValueError(
+                f"subscription_queue must start with '/queue/' or '/topic/', got: '{subscription_queue}'. "
+                f"Use '/queue/{subscription_queue}' for anycast or '/topic/{subscription_queue}' for multicast."
+            )
+
         self.agent_type = agent_type
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
@@ -156,9 +169,19 @@ class BaseAgent(stomp.ConnectionListener):
 
         # Create unique agent name with username and sequential ID
         import getpass
-        username = getpass.getuser()
+        self.username = getpass.getuser()
         agent_id = self.get_next_agent_id()
-        self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
+        self.agent_name = f"{self.agent_type.lower()}-agent-{self.username}-{agent_id}"
+
+        # Workflow context tracking (populated from messages)
+        self.current_execution_id = None
+        self.current_run_id = None
+
+        # Process identification for agent management
+        self.pid = os.getpid()
+        self.hostname = socket.gethostname()
+        self.operational_state = 'STARTING'  # STARTING, READY, PROCESSING, EXITED
+
         # Use HTTP URL for REST logging (no auth required)
         self.base_url = (os.getenv('SWF_MONITOR_HTTP_URL') or '').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
@@ -213,49 +236,68 @@ class BaseAgent(stomp.ConnectionListener):
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    def _log_extra(self, **kwargs):
+        """
+        Build extra dict for logging with common context fields.
+
+        Automatically includes username, execution_id, and run_id when set.
+        Subclasses can override to add additional fields, calling super()._log_extra().
+
+        Usage:
+            self.logger.info("Message", extra=self._log_extra(custom_field=value))
+        """
+        extra = {'username': self.username}
+        if self.current_execution_id:
+            extra['execution_id'] = self.current_execution_id
+        if self.current_run_id:
+            extra['run_id'] = self.current_run_id
+        extra.update(kwargs)
+        return extra
+
     def run(self):
         """
         Connects to the message broker and runs the agent's main loop.
         """
         logging.info(f"Starting {self.agent_name}...")
 
-        # Track MQ connection status
-        self.mq_connected = False
-
-        # Initial connection with retry
-        max_retries = 3
-        retry_delay = 5
-        for attempt in range(1, max_retries + 1):
-            logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
-            try:
-                self.conn.connect(
-                    self.mq_user,
-                    self.mq_password,
-                    wait=True,
-                    version='1.1',
-                    headers={
-                        'client-id': self.agent_name,
-                        'heart-beat': '30000,30000'
-                    }
-                )
-                self.mq_connected = True
-                break
-            except Exception as e:
-                logging.warning(f"Connection attempt {attempt} failed: {e}")
-                if attempt < max_retries:
-                    logging.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                else:
-                    logging.error(f"Failed to connect after {max_retries} attempts")
-                    raise
+        # Connect if not already connected (some subclasses connect in __init__)
+        if not getattr(self, 'mq_connected', False):
+            max_retries = 3
+            retry_delay = 5
+            for attempt in range(1, max_retries + 1):
+                logging.info(f"Connecting to ActiveMQ at {self.mq_host}:{self.mq_port} (attempt {attempt}/{max_retries})")
+                try:
+                    self.conn.connect(
+                        self.mq_user,
+                        self.mq_password,
+                        wait=True,
+                        version='1.1',
+                        headers={
+                            'client-id': self.agent_name,
+                            'heart-beat': '30000,30000'
+                        }
+                    )
+                    self.mq_connected = True
+                    break
+                except Exception as e:
+                    logging.warning(f"Connection attempt {attempt} failed: {e}")
+                    if attempt < max_retries:
+                        logging.info(f"Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                    else:
+                        logging.error(f"Failed to connect after {max_retries} attempts")
+                        raise
 
         try:
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
-            
+
             # Register as subscriber in monitor
             self.register_subscriber()
-            
+
+            # Agent is now ready and waiting for work
+            self.set_ready()
+
             # Initial registration/heartbeat
             self.send_heartbeat()
 
@@ -283,6 +325,7 @@ class BaseAgent(stomp.ConnectionListener):
         finally:
             # Report exit status before disconnecting
             try:
+                self.operational_state = 'EXITED'
                 self.report_agent_status("EXITED", "Agent shutdown")
             except Exception as e:
                 logging.warning(f"Failed to report exit status: {e}")
@@ -394,6 +437,73 @@ class BaseAgent(stomp.ConnectionListener):
             logging.error(f"CRITICAL: Failed to parse message JSON: {e}")
             raise RuntimeError(f"Message parsing failed - agent cannot continue: {e}") from e
 
+    # -------------------------------------------------------------------------
+    # Processing State API
+    # -------------------------------------------------------------------------
+
+    def set_processing(self):
+        """
+        Declare that the agent is actively doing work.
+
+        Call this when the agent begins a unit of work (which may span multiple
+        messages). The agent will report PROCESSING state in heartbeats until
+        set_ready() is called.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'start_run':
+                    self.set_processing()
+                    # ... do work ...
+        """
+        self.operational_state = 'PROCESSING'
+        logging.info(f"{self.agent_name} state -> PROCESSING")
+
+    def set_ready(self):
+        """
+        Declare that the agent is idle, waiting for work.
+
+        Call this when a unit of work is complete and the agent is ready
+        to receive new work.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'end_run':
+                    # ... finalize work ...
+                    self.set_ready()
+        """
+        self.operational_state = 'READY'
+        logging.info(f"{self.agent_name} state -> READY")
+
+    def processing(self):
+        """
+        Context manager for bounded processing work.
+
+        Use this when a unit of work is contained within a single code block.
+        Automatically sets PROCESSING on entry and READY on exit.
+
+        Example:
+            def on_message(self, frame):
+                message_data, msg_type = self.log_received_message(frame)
+                if msg_type == 'process_stf':
+                    with self.processing():
+                        # ... do bounded work ...
+                    # automatically back to READY
+        """
+        agent = self
+
+        class ProcessingContext:
+            def __enter__(self):
+                agent.set_processing()
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                agent.set_ready()
+                return False  # Don't suppress exceptions
+
+        return ProcessingContext()
+
     def get_next_agent_id(self):
         """Get the next agent ID from persistent state API."""
         return get_next_agent_id(self.monitor_url, self.api, logging.getLogger(__name__))
@@ -402,10 +512,21 @@ class BaseAgent(stomp.ConnectionListener):
         """
         Sends a JSON message to a specific destination.
 
-        Auto-injects 'sender' (agent_name) and 'namespace' (if configured) into message.
-        Warns if namespace is not configured - messages without namespace cannot be
-        filtered by namespace-aware agents.
+        Args:
+            destination: ActiveMQ destination with explicit prefix.
+                Must start with '/queue/' (anycast) or '/topic/' (multicast).
+            message_body: Dict to send as JSON. 'sender' and 'namespace' auto-injected.
+
+        Raises:
+            ValueError: If destination doesn't have /queue/ or /topic/ prefix
         """
+        # Validate destination has explicit prefix
+        if not destination.startswith('/queue/') and not destination.startswith('/topic/'):
+            raise ValueError(
+                f"destination must start with '/queue/' or '/topic/', got: '{destination}'. "
+                f"Use '/queue/{destination}' for anycast or '/topic/{destination}' for multicast."
+            )
+
         # Auto-inject sender and namespace
         message_body['sender'] = self.agent_name
         if self.namespace:
@@ -487,7 +608,10 @@ class BaseAgent(stomp.ConnectionListener):
             "agent_type": self.agent_type,
             "status": status,
             "description": description,
-            "mq_connected": getattr(self, 'mq_connected', False)  # Include MQ status in payload
+            "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
         }
 
         # Include namespace if configured
@@ -526,6 +650,9 @@ class BaseAgent(stomp.ConnectionListener):
             "status": status,
             "description": description,
             "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
             # Include workflow metadata in agent record
             "workflow_enabled": True if workflow_metadata else False,
             "current_stf_count": workflow_metadata.get('active_tasks', 0) if workflow_metadata else 0,
@@ -548,19 +675,22 @@ class BaseAgent(stomp.ConnectionListener):
     def report_agent_status(self, status, message=None, error_details=None):
         """Report agent status change to monitor."""
         logging.info(f"Reporting agent status: {status}")
-        
+
         description_parts = [f"{self.agent_type} agent"]
         if message:
             description_parts.append(message)
         if error_details:
             description_parts.append(f"Error: {error_details}")
-        
+
         payload = {
             "instance_name": self.agent_name,
             "agent_type": self.agent_type,
             "status": status,
             "description": ". ".join(description_parts),
-            "mq_connected": getattr(self, 'mq_connected', False)
+            "mq_connected": getattr(self, 'mq_connected', False),
+            "pid": self.pid,
+            "hostname": self.hostname,
+            "operational_state": self.operational_state,
         }
 
         # Include namespace if configured
