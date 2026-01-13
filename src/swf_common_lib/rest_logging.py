@@ -56,6 +56,11 @@ class RestLogHandler(logging.Handler):
     def emit(self, record):
         """Send log record to REST API."""
         try:
+            extra_data = {}
+            for key in ('execution_id', 'workflow_name', 'run_id'):
+                if hasattr(record, key):
+                    extra_data[key] = getattr(record, key)
+
             log_data = {
                 'app_name': self.app_name,
                 'instance_name': self.instance_name,
@@ -68,12 +73,7 @@ class RestLogHandler(logging.Handler):
                 'lineno': record.lineno or 0,
                 'process': record.process or 0,
                 'thread': record.thread or 0,
-                'extra_data': {
-                    'pathname': record.pathname,
-                    'filename': record.filename,
-                    'created': record.created,
-                    'msecs': record.msecs,
-                }
+                'extra_data': extra_data or None,
             }
             
             response = self.session.post(self.logs_url, json=log_data, timeout=self.timeout)
