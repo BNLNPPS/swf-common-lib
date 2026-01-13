@@ -57,7 +57,7 @@ class RestLogHandler(logging.Handler):
         """Send log record to REST API."""
         try:
             extra_data = {}
-            for key in ('execution_id', 'workflow_name', 'run_id'):
+            for key in ('execution_id', 'workflow_name', 'run_id', 'username'):
                 if hasattr(record, key):
                     extra_data[key] = getattr(record, key)
 

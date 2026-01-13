@@ -169,9 +169,13 @@ class BaseAgent(stomp.ConnectionListener):
 
         # Create unique agent name with username and sequential ID
         import getpass
-        username = getpass.getuser()
+        self.username = getpass.getuser()
         agent_id = self.get_next_agent_id()
-        self.agent_name = f"{self.agent_type.lower()}-agent-{username}-{agent_id}"
+        self.agent_name = f"{self.agent_type.lower()}-agent-{self.username}-{agent_id}"
+
+        # Workflow context tracking (populated from messages)
+        self.current_execution_id = None
+        self.current_run_id = None
 
         # Process identification for agent management
         self.pid = os.getpid()
@@ -231,6 +235,24 @@ class BaseAgent(stomp.ConnectionListener):
             }
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _log_extra(self, **kwargs):
+        """
+        Build extra dict for logging with common context fields.
+
+        Automatically includes username, execution_id, and run_id when set.
+        Subclasses can override to add additional fields, calling super()._log_extra().
+
+        Usage:
+            self.logger.info("Message", extra=self._log_extra(custom_field=value))
+        """
+        extra = {'username': self.username}
+        if self.current_execution_id:
+            extra['execution_id'] = self.current_execution_id
+        if self.current_run_id:
+            extra['run_id'] = self.current_run_id
+        extra.update(kwargs)
+        return extra
 
     def run(self):
         """
