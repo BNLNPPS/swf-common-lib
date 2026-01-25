@@ -5,6 +5,7 @@ This module contains the base class for all agents.
 import os
 import sys
 import time
+import signal
 import socket
 import stomp
 import requests
@@ -146,16 +147,28 @@ class BaseAgent(stomp.ConnectionListener):
         self.subscription_queue = subscription_queue
         self.DEBUG = debug
 
-        # Load testbed configuration (namespace) if config path provided
+        # Resolve config path: explicit arg > SWF_TESTBED_CONFIG env var > default
+        if config_path is None:
+            env_config = os.getenv('SWF_TESTBED_CONFIG')
+            if env_config:
+                # Env var is filename, resolve to workflows/ directory
+                if not env_config.startswith('workflows/') and '/' not in env_config:
+                    config_path = f'workflows/{env_config}'
+                else:
+                    config_path = env_config
+            else:
+                config_path = 'workflows/testbed.toml'
+        self.config_path = config_path  # Store for subclasses
+
+        # Load testbed configuration (namespace)
         self.namespace = None
-        if config_path:
-            try:
-                config = load_testbed_config(config_path=config_path)
-                self.namespace = config.namespace
-                logging.info(f"Namespace: {self.namespace}")
-            except TestbedConfigError as e:
-                logging.error(f"Configuration error: {e}")
-                raise
+        try:
+            config = load_testbed_config(config_path=config_path)
+            self.namespace = config.namespace
+            logging.info(f"Namespace: {self.namespace}")
+        except TestbedConfigError as e:
+            logging.error(f"Configuration error: {e}")
+            raise
 
         # Configuration from environment variables (needed for agent ID API call)
         self.monitor_url = (os.getenv('SWF_MONITOR_URL') or '').rstrip('/')
@@ -258,6 +271,15 @@ class BaseAgent(stomp.ConnectionListener):
         """
         Connects to the message broker and runs the agent's main loop.
         """
+        # Register signal handlers for graceful shutdown
+        def signal_handler(signum, frame):
+            sig_name = signal.Signals(signum).name
+            logging.info(f"Received {sig_name}, initiating graceful shutdown...")
+            raise KeyboardInterrupt(f"Received {sig_name}")
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGQUIT, signal_handler)
+
         logging.info(f"Starting {self.agent_name}...")
 
         # Connect if not already connected (some subclasses connect in __init__)
