@@ -241,18 +241,25 @@ class BaseAgent(stomp.ConnectionListener):
         # Configure SSL if enabled - must be done before set_listener
         if self.use_ssl:
             import ssl
-            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
             
             if self.ssl_ca_certs:
-                # Configure SSL transport
+                # Configure SSL transport with certificate verification
+                logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
                 self.conn.transport.set_ssl(
                     for_hosts=[(self.mq_host, self.mq_port)],
                     ca_certs=self.ssl_ca_certs,
                     ssl_version=ssl.PROTOCOL_TLS_CLIENT
                 )
-                logging.info("SSL transport configured successfully")
+                logging.info("SSL transport configured successfully with certificate verification")
             else:
-                logging.warning("SSL enabled but no CA certificate file specified")
+                # No CA cert provided - disable verification
+                logging.warning("SSL enabled but no CA certificate file specified - disabling certificate verification")
+                self.conn.transport.set_ssl(
+                    for_hosts=[(self.mq_host, self.mq_port)],
+                    ca_certs=None,
+                    ssl_version=ssl.PROTOCOL_TLS
+                )
+                logging.info("SSL transport configured without certificate verification")
         
         self.conn.set_listener('', self)
         
