@@ -219,25 +219,57 @@ BaseAgent(
 
 ### Publishing Method
 
-#### `send_message(destination, message_body)`
+#### `send_message(destination, message_body, headers=None)`
 
-Send a message to a destination.
+Send a message to a destination with optional custom headers.
 
 ```python
 # Send to queue
 agent.send_message('/queue/myqueue', {'msg_type': 'test'})
 
-# Send to topic
-agent.send_message('/topic/events', {'msg_type': 'event'})
+# Send to topic with custom headers
+agent.send_message('/topic/events', 
+                   {'msg_type': 'event'},
+                   headers={'persistent': 'true', 'priority': '9'})
 ```
 
 **Parameters:**
 - `destination` (str): ActiveMQ destination (`/queue/...` or `/topic/...`)
 - `message_body` (dict): Message payload (JSON-serializable)
+- `headers` (dict, optional): STOMP headers to include with the message. If provided, they are merged with default headers (user headers take precedence).
 
-**Auto-injected fields:**
+**Auto-injected message body fields:**
 - `sender`: Agent name
 - `namespace`: Namespace (if configured)
+- `created_at`: UTC timestamp in ISO 8601 format (if not already present)
+
+**Default STOMP headers** (applied automatically, can be overridden):
+- `persistent`: 'false'
+- `vo`: 'eic'
+- `msg_type`: Extracted from message body
+- `namespace`: Extracted from message body
+- `run_id`: Current run ID (or 'none')
+
+**Examples:**
+
+```python
+# Basic message - uses all defaults
+agent.send_message('/queue/output', {'msg_type': 'result', 'data': 'value'})
+# Auto-adds: sender, namespace, created_at
+# Default headers: persistent='false', vo='eic', etc.
+
+# Override specific headers
+agent.send_message('/queue/output', 
+                   {'msg_type': 'important'},
+                   headers={'persistent': 'true'})
+# Merges: user's persistent='true' + other defaults
+
+# Add custom headers
+agent.send_message('/queue/output',
+                   {'msg_type': 'data'},
+                   headers={'priority': '9', 'custom-header': 'value'})
+# Includes: all defaults + priority + custom-header
+```
 
 **Raises:**
 - `ValueError`: If destination format is invalid

@@ -33,10 +33,12 @@ New methods added:
 - `remove_subscription(destination)` - Remove subscription
 - `get_subscriptions()` - Query current subscriptions
 
-### 4. Simplified Publishing
-- Use `send_message(destination, body)` to publish to any destination
-- No pre-configuration needed
-- Maximum flexibility
+### 4. Enhanced Publishing
+- Use `send_message(destination, body, headers=None)` to publish to any destination
+- **Auto-injected message fields**: `sender`, `namespace`, `created_at` (UTC timestamp)
+- **Default STOMP headers**: Automatically includes persistent, vo, msg_type, namespace, run_id
+- **Header merging**: User-provided headers merge with defaults (user takes precedence)
+- Maximum flexibility with sensible defaults
 
 ## Benefits
 
@@ -130,8 +132,26 @@ class MyAgent(BaseAgent):
         if msg_type == 'process_data':
             with self.processing():
                 result = self._process(message_data)
-                self.send_message('/queue/results', result)
+                # Automatic: sender, namespace, created_at added
+                # Default headers applied and merged with custom ones
+                self.send_message('/queue/results', 
+                                result,
+                                headers={'persistent': 'true'})
 ```
+
+## Recent Enhancements (v2.1)
+
+### SSL Configuration
+- **Without CA certificate**: Automatically disables certificate verification
+- Uses `ssl.PROTOCOL_TLS` with `ca_certs=None` when no cert provided
+- Enables SSL connections in development environments
+
+### Message Publishing Improvements
+- **Auto-timestamping**: `created_at` field automatically added (UTC ISO 8601 format)
+- **Default STOMP headers**: Consistent headers across all messages
+  - `persistent`, `vo`, `msg_type`, `namespace`, `run_id`
+- **Header merging**: User headers merge with defaults (user takes precedence)
+- **Optional headers parameter**: Full control when needed
 
 ## Support
 
@@ -143,5 +163,5 @@ For questions or issues:
 ---
 
 **Status**: ✅ Complete and Production Ready
-**Version**: 2.0
+**Version**: 2.1
 **Backward Compatible**: Yes
