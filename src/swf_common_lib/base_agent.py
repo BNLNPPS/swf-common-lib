@@ -562,7 +562,7 @@ class BaseAgent(stomp.ConnectionListener):
         """Get the next agent ID from persistent state API."""
         return get_next_agent_id(self.monitor_url, self.api, logging.getLogger(__name__))
 
-    def send_message(self, destination, message_body):
+    def send_message(self, destination, message_body, headers=None):
         """
         Sends a JSON message to a specific destination.
 
@@ -571,6 +571,9 @@ class BaseAgent(stomp.ConnectionListener):
                 Must start with '/queue/' (anycast) or '/topic/' (multicast).
                 Example: '/queue/myqueue' or '/topic/mytopic'
             message_body: Dict to send as JSON. 'sender' and 'namespace' auto-injected.
+            headers: Optional dict of STOMP headers to include with the message.
+                If not provided, default headers will be used.
+                Example: {'persistent': 'true', 'priority': '9'}
 
         Raises:
             ValueError: If destination doesn't have /queue/ or /topic/ prefix
@@ -592,8 +595,30 @@ class BaseAgent(stomp.ConnectionListener):
                 "Configure namespace in testbed.toml to enable namespace filtering."
             )
 
+        # Prepare default headers
+        default_headers = {
+            'persistent': 'false',
+            'vo': 'eic',
+            'msg_type': message_body.get('msg_type', 'unknown'),
+            'namespace': message_body.get('namespace', 'default'),
+            'run_id': str(self.current_run_id) if self.current_run_id else 'none'
+        }
+        
+        # Merge user-provided headers with defaults (user headers take precedence)
+        if headers:
+            default_headers.update(headers)
+        
+        final_headers = default_headers
+
         try:
-            self.conn.send(body=json.dumps(message_body), destination=destination)
+            # Prepare send kwargs
+            send_kwargs = {
+                'body': json.dumps(message_body),
+                'destination': destination,
+                'headers': final_headers
+            }
+            
+            self.conn.send(**send_kwargs)
             logging.info(f"Sent message to '{destination}': {message_body}")
         except Exception as e:
             logging.error(f"Failed to send message to '{destination}': {e}")
@@ -605,7 +630,7 @@ class BaseAgent(stomp.ConnectionListener):
                 time.sleep(1)  # Brief pause before retry
                 if self._attempt_reconnect():
                     try:
-                        self.conn.send(body=json.dumps(message_body), destination=destination)
+                        self.conn.send(**send_kwargs)
                         logging.info(f"Message sent successfully after reconnection to '{destination}'")
                     except Exception as retry_e:
                         logging.error(f"Retry failed after reconnection: {retry_e}")
