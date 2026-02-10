@@ -1,4 +1,4 @@
-git """
+"""
 Test suite for BaseAgent multi-subscriber functionality.
 
 Tests cover:
