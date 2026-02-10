@@ -147,6 +147,10 @@ class BaseAgent(stomp.ConnectionListener):
                 "Consider migrating to 'subscription_queues' for multiple subscriptions."
             )
         
+        # Validate that at least one subscription is provided
+        if not subscription_queues or len(subscription_queues) == 0:
+            raise ValueError("At least one subscription queue must be provided")
+        
         # Validate all subscription destinations have explicit prefix
         self.subscription_queues = []
         for queue in subscription_queues:
