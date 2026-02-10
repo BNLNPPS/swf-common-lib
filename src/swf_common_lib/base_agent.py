@@ -594,6 +594,11 @@ class BaseAgent(stomp.ConnectionListener):
                 f"Sending message without namespace (msg_type={message_body.get('msg_type', 'unknown')}). "
                 "Configure namespace in testbed.toml to enable namespace filtering."
             )
+        
+        # Auto-inject created_at timestamp if not present
+        if 'created_at' not in message_body:
+            from datetime import datetime, timezone
+            message_body['created_at'] = datetime.now(timezone.utc).isoformat()
 
         # Prepare default headers
         default_headers = {
