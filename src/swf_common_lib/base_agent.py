@@ -11,6 +11,7 @@ import stomp
 import requests
 import json
 import logging
+import warnings
 from pathlib import Path
 from typing import Optional
 from .api_utils import get_next_agent_id
@@ -142,9 +143,11 @@ class BaseAgent(stomp.ConnectionListener):
             if subscription_queue is None:
                 raise ValueError("Either subscription_queue or subscription_queues must be provided")
             subscription_queues = [subscription_queue]
-            logging.warning(
+            warnings.warn(
                 "Using deprecated 'subscription_queue' parameter. "
-                "Consider migrating to 'subscription_queues' for multiple subscriptions."
+                "Consider migrating to 'subscription_queues' for multiple subscriptions.",
+                UserWarning,
+                stacklevel=2
             )
         
         # Validate that at least one subscription is provided
