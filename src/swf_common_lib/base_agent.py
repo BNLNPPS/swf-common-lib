@@ -13,7 +13,7 @@ import json
 import logging
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from .api_utils import get_next_agent_id
 from .config_utils import load_testbed_config, TestbedConfigError
 
@@ -170,7 +170,8 @@ class BaseAgent(stomp.ConnectionListener):
         self.DEBUG = debug
         
         # Track subscription IDs for management
-        self._subscription_ids = {}
+        # Maps destination -> subscription id
+        self._subscription_ids: Dict[str, int] = {}
 
         # Resolve config path: explicit arg > SWF_TESTBED_CONFIG env var > default
         if config_path is None:
