@@ -5,6 +5,12 @@ on:
     branches:
       - '**'
 
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true

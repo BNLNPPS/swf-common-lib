@@ -11,8 +11,9 @@ import stomp
 import requests
 import json
 import logging
+import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from .api_utils import get_next_agent_id
 from .config_utils import load_testbed_config, TestbedConfigError
 
@@ -120,32 +121,57 @@ class BaseAgent(stomp.ConnectionListener):
         'stf_gen', 'stf_ready', 'tf_file_registered'
     }
 
-    def __init__(self, agent_type, subscription_queue, debug=False,
-                 config_path: Optional[str] = None):
+    def __init__(self, agent_type, subscription_queue=None, subscription_queues=None,
+                 debug=False, config_path: Optional[str] = None):
         """
-        Initialize BaseAgent.
+        Initialize BaseAgent with support for multiple subscribers.
 
         Args:
             agent_type: Type of agent (e.g., 'DATA', 'PROCESSING')
-            subscription_queue: ActiveMQ destination with explicit prefix.
-                Must start with '/queue/' (anycast) or '/topic/' (multicast).
-                Example: '/queue/workflow_control' or '/topic/epictopic'
+            subscription_queue: (Deprecated) Single ActiveMQ destination. Use subscription_queues instead.
+            subscription_queues: List of ActiveMQ destinations to subscribe to.
+                Each must start with '/queue/' (anycast) or '/topic/' (multicast).
+                Example: ['/queue/workflow_control', '/topic/epictopic']
             debug: Enable debug logging
             config_path: Path to testbed.toml config file
 
         Raises:
-            ValueError: If subscription_queue doesn't have /queue/ or /topic/ prefix
+            ValueError: If destinations don't have /queue/ or /topic/ prefix
         """
-        # Validate destination has explicit prefix (required for Artemis routing)
-        if not subscription_queue.startswith('/queue/') and not subscription_queue.startswith('/topic/'):
-            raise ValueError(
-                f"subscription_queue must start with '/queue/' or '/topic/', got: '{subscription_queue}'. "
-                f"Use '/queue/{subscription_queue}' for anycast or '/topic/{subscription_queue}' for multicast."
+        # Handle backward compatibility for single subscription_queue
+        if subscription_queues is None:
+            if subscription_queue is None:
+                raise ValueError("Either subscription_queue or subscription_queues must be provided")
+            subscription_queues = [subscription_queue]
+            warnings.warn(
+                "Using deprecated 'subscription_queue' parameter. "
+                "Consider migrating to 'subscription_queues' for multiple subscriptions.",
+                UserWarning,
+                stacklevel=2
             )
-
+        
+        # Validate that at least one subscription is provided
+        if not subscription_queues or len(subscription_queues) == 0:
+            raise ValueError("At least one subscription queue must be provided")
+        
+        # Validate all subscription destinations have explicit prefix
+        self.subscription_queues = []
+        for queue in subscription_queues:
+            if not queue.startswith('/queue/') and not queue.startswith('/topic/'):
+                raise ValueError(
+                    f"subscription destination must start with '/queue/' or '/topic/', got: '{queue}'. "
+                    f"Use '/queue/{queue}' for anycast or '/topic/{queue}' for multicast."
+                )
+            self.subscription_queues.append(queue)
+        
         self.agent_type = agent_type
-        self.subscription_queue = subscription_queue
+        # Keep subscription_queue for backward compatibility (first in list)
+        self.subscription_queue = self.subscription_queues[0]
         self.DEBUG = debug
+        
+        # Track subscription IDs for management
+        # Maps destination -> subscription id
+        self._subscription_ids: Dict[str, int] = {}
 
         # Resolve config path: explicit arg > SWF_TESTBED_CONFIG env var > default
         if config_path is None:
@@ -223,18 +249,25 @@ class BaseAgent(stomp.ConnectionListener):
         # Configure SSL if enabled - must be done before set_listener
         if self.use_ssl:
             import ssl
-            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
             
             if self.ssl_ca_certs:
-                # Configure SSL transport
+                # Configure SSL transport with certificate verification
+                logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
                 self.conn.transport.set_ssl(
                     for_hosts=[(self.mq_host, self.mq_port)],
                     ca_certs=self.ssl_ca_certs,
                     ssl_version=ssl.PROTOCOL_TLS_CLIENT
                 )
-                logging.info("SSL transport configured successfully")
+                logging.info("SSL transport configured successfully with certificate verification")
             else:
-                logging.warning("SSL enabled but no CA certificate file specified")
+                # No CA cert provided - disable verification
+                logging.warning("SSL enabled but no CA certificate file specified - disabling certificate verification")
+                self.conn.transport.set_ssl(
+                    for_hosts=[(self.mq_host, self.mq_port)],
+                    ca_certs=None,
+                    ssl_version=ssl.PROTOCOL_TLS
+                )
+                logging.info("SSL transport configured without certificate verification")
         
         self.conn.set_listener('', self)
         
@@ -311,11 +344,14 @@ class BaseAgent(stomp.ConnectionListener):
                         raise
 
         try:
-            self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
-            logging.info(f"Subscribed to queue: '{self.subscription_queue}'")
+            # Subscribe to all configured queues
+            for idx, queue in enumerate(self.subscription_queues, start=1):
+                self.conn.subscribe(destination=queue, id=idx, ack='auto')
+                self._subscription_ids[queue] = idx
+                logging.info(f"Subscribed to destination [{idx}]: '{queue}'")
 
-            # Register as subscriber in monitor
-            self.register_subscriber()
+            # Register as subscriber in monitor for all queues
+            self.register_subscribers()
 
             # Agent is now ready and waiting for work
             self.set_ready()
@@ -377,7 +413,7 @@ class BaseAgent(stomp.ConnectionListener):
             logging.warning(f"Heartbeat failed during disconnect: {e}")
 
     def _attempt_reconnect(self):
-        """Attempt to reconnect to ActiveMQ."""
+        """Attempt to reconnect to ActiveMQ and resubscribe to all queues."""
         if self.mq_connected:
             return True
             
@@ -397,7 +433,11 @@ class BaseAgent(stomp.ConnectionListener):
                 }
             )
             
-            self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
+            # Resubscribe to all queues
+            for idx, queue in enumerate(self.subscription_queues, start=1):
+                self.conn.subscribe(destination=queue, id=idx, ack='auto')
+                logging.info(f"Resubscribed to destination [{idx}]: '{queue}'")
+            
             self.mq_connected = True
             logging.info("Successfully reconnected to ActiveMQ")
             return True
@@ -530,14 +570,18 @@ class BaseAgent(stomp.ConnectionListener):
         """Get the next agent ID from persistent state API."""
         return get_next_agent_id(self.monitor_url, self.api, logging.getLogger(__name__))
 
-    def send_message(self, destination, message_body):
+    def send_message(self, destination, message_body, headers=None):
         """
         Sends a JSON message to a specific destination.
 
         Args:
             destination: ActiveMQ destination with explicit prefix.
                 Must start with '/queue/' (anycast) or '/topic/' (multicast).
+                Example: '/queue/myqueue' or '/topic/mytopic'
             message_body: Dict to send as JSON. 'sender' and 'namespace' auto-injected.
+            headers: Optional dict of STOMP headers to include with the message.
+                If not provided, default headers will be used.
+                Example: {'persistent': 'true', 'priority': '9'}
 
         Raises:
             ValueError: If destination doesn't have /queue/ or /topic/ prefix
@@ -558,9 +602,36 @@ class BaseAgent(stomp.ConnectionListener):
                 f"Sending message without namespace (msg_type={message_body.get('msg_type', 'unknown')}). "
                 "Configure namespace in testbed.toml to enable namespace filtering."
             )
+        
+        # Auto-inject created_at timestamp if not present
+        if 'created_at' not in message_body:
+            from datetime import datetime, timezone
+            message_body['created_at'] = datetime.now(timezone.utc).isoformat()
+
+        # Prepare default headers
+        default_headers = {
+            'persistent': 'false',
+            'vo': 'eic',
+            'msg_type': message_body.get('msg_type', 'unknown'),
+            'namespace': message_body.get('namespace', 'default'),
+            'run_id': str(self.current_run_id) if self.current_run_id else 'none'
+        }
+        
+        # Merge user-provided headers with defaults (user headers take precedence)
+        if headers:
+            default_headers.update(headers)
+        
+        final_headers = default_headers
 
         try:
-            self.conn.send(body=json.dumps(message_body), destination=destination)
+            # Prepare send kwargs
+            send_kwargs = {
+                'body': json.dumps(message_body),
+                'destination': destination,
+                'headers': final_headers
+            }
+            
+            self.conn.send(**send_kwargs)
             logging.info(f"Sent message to '{destination}': {message_body}")
         except Exception as e:
             logging.error(f"Failed to send message to '{destination}': {e}")
@@ -572,7 +643,7 @@ class BaseAgent(stomp.ConnectionListener):
                 time.sleep(1)  # Brief pause before retry
                 if self._attempt_reconnect():
                     try:
-                        self.conn.send(body=json.dumps(message_body), destination=destination)
+                        self.conn.send(**send_kwargs)
                         logging.info(f"Message sent successfully after reconnection to '{destination}'")
                     except Exception as retry_e:
                         logging.error(f"Retry failed after reconnection: {retry_e}")
@@ -746,12 +817,24 @@ class BaseAgent(stomp.ConnectionListener):
         return self._api_request(method.lower(), endpoint, json_data)
     
     def register_subscriber(self):
-        """Register this agent as a subscriber to its ActiveMQ queue."""
-        logging.info(f"Registering subscriber for queue '{self.subscription_queue}'...")
+        """
+        Register this agent as a subscriber to its ActiveMQ queue.
+        
+        DEPRECATED: Use register_subscribers() for multiple queue support.
+        This method remains for backward compatibility and registers only the first queue.
+        """
+        logging.warning(
+            "register_subscriber() is deprecated. Use register_subscribers() instead."
+        )
+        return self._register_single_subscriber(self.subscription_queue)
+    
+    def _register_single_subscriber(self, queue):
+        """Internal method to register a single subscriber."""
+        logging.info(f"Registering subscriber for queue '{queue}'...")
         
         subscriber_data = {
-            "subscriber_name": f"{self.agent_name}-{self.subscription_queue}",
-            "description": f"{self.agent_type} agent subscribing to {self.subscription_queue}",
+            "subscriber_name": f"{self.agent_name}-{queue}",
+            "description": f"{self.agent_type} agent subscribing to {queue}",
             "is_active": True,
             "fraction": 1.0  # Receives all messages
         }
@@ -766,9 +849,121 @@ class BaseAgent(stomp.ConnectionListener):
                     logging.info(f"Subscriber registered successfully: {result.get('subscriber_name')}")
                     return True
             else:
-                logging.error("Failed to register subscriber")
+                logging.error(f"Failed to register subscriber for {queue}")
                 return False
         except Exception as e:
             # Other registration failures are critical
-            logging.error(f"Critical subscriber registration failure: {e}")
+            logging.error(f"Critical subscriber registration failure for {queue}: {e}")
             raise e
+    
+    def register_subscribers(self):
+        """
+        Register this agent as a subscriber to all configured ActiveMQ queues.
+        
+        Returns:
+            bool: True if all registrations succeeded, False otherwise
+        """
+        logging.info(f"Registering {len(self.subscription_queues)} subscriber(s)...")
+        
+        all_success = True
+        for queue in self.subscription_queues:
+            try:
+                success = self._register_single_subscriber(queue)
+                all_success = all_success and success
+            except Exception as e:
+                logging.error(f"Failed to register subscriber for {queue}: {e}")
+                all_success = False
+        
+        if all_success:
+            logging.info(f"All {len(self.subscription_queues)} subscriber(s) registered successfully")
+        else:
+            logging.warning("Some subscriber registrations failed")
+        
+        return all_success
+    
+    def add_subscription(self, destination):
+        """
+        Dynamically add a new subscription to a queue/topic.
+        
+        Args:
+            destination: ActiveMQ destination ('/queue/...' or '/topic/...')
+            
+        Returns:
+            bool: True if subscription was added successfully
+            
+        Raises:
+            ValueError: If destination format is invalid
+        """
+        # Validate destination
+        if not destination.startswith('/queue/') and not destination.startswith('/topic/'):
+            raise ValueError(
+                f"destination must start with '/queue/' or '/topic/', got: '{destination}'"
+            )
+        
+        # Check if already subscribed
+        if destination in self.subscription_queues:
+            logging.info(f"Already subscribed to '{destination}'")
+            return True
+        
+        try:
+            # Add to subscription list
+            self.subscription_queues.append(destination)
+            
+            # Subscribe via STOMP if connected
+            if self.mq_connected:
+                sub_id = len(self.subscription_queues)
+                self.conn.subscribe(destination=destination, id=sub_id, ack='auto')
+                self._subscription_ids[destination] = sub_id
+                logging.info(f"Dynamically subscribed to '{destination}' with id={sub_id}")
+            
+            # Register with monitor
+            self._register_single_subscriber(destination)
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to add subscription to '{destination}': {e}")
+            # Remove from list if STOMP subscription failed
+            if destination in self.subscription_queues:
+                self.subscription_queues.remove(destination)
+            return False
+    
+    def remove_subscription(self, destination):
+        """
+        Dynamically remove a subscription from a queue/topic.
+        
+        Args:
+            destination: ActiveMQ destination to unsubscribe from
+            
+        Returns:
+            bool: True if unsubscription was successful
+        """
+        if destination not in self.subscription_queues:
+            logging.warning(f"Not subscribed to '{destination}'")
+            return False
+        
+        try:
+            # Unsubscribe via STOMP if connected
+            if self.mq_connected and destination in self._subscription_ids:
+                sub_id = self._subscription_ids[destination]
+                self.conn.unsubscribe(id=sub_id)
+                del self._subscription_ids[destination]
+                logging.info(f"Unsubscribed from '{destination}'")
+            
+            # Remove from list
+            self.subscription_queues.remove(destination)
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to remove subscription from '{destination}': {e}")
+            return False
+    
+    def get_subscriptions(self):
+        """
+        Get list of current subscriptions.
+        
+        Returns:
+            list: Current subscription destinations
+        """
+        return self.subscription_queues.copy()
