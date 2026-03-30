@@ -5,7 +5,74 @@ These utilities are shared between BaseAgent and other components that need
 to interact with the swf-monitor REST API but don't inherit from BaseAgent.
 """
 
+import time
 import logging
+import requests
+
+
+RETRY_DELAYS = (2, 4, 8, 20)
+RETRYABLE_STATUS_CODES = {502, 503, 504}
+
+
+def api_request_with_retry(method, url, session=None, logger=None, **kwargs):
+    """
+    Make an HTTP request with exponential backoff retry on transient failures.
+
+    Retries on: ConnectionError, Timeout, 502/503/504.
+    Fails immediately on: 4xx, redirects, other errors.
+
+    Args:
+        method: HTTP method ('get', 'post', etc.)
+        url: Full URL
+        session: requests.Session to use (falls back to requests module)
+        logger: Logger instance
+        **kwargs: Passed to requests (json, timeout, etc.)
+
+    Returns:
+        requests.Response on success
+
+    Raises:
+        requests.exceptions.RequestException on final failure
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    if session is None:
+        session = requests
+
+    kwargs.setdefault('timeout', 10)
+
+    last_exception = None
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            response = session.request(method, url, **kwargs)
+
+            if response.status_code in RETRYABLE_STATUS_CODES:
+                if attempt < len(RETRY_DELAYS):
+                    delay = RETRY_DELAYS[attempt]
+                    logger.warning(
+                        f"Retryable HTTP {response.status_code} from {method.upper()} {url}, "
+                        f"retry {attempt + 1}/{len(RETRY_DELAYS)} in {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    response.raise_for_status()
+
+            return response
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_exception = e
+            if attempt < len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"{type(e).__name__} on {method.upper()} {url}, "
+                    f"retry {attempt + 1}/{len(RETRY_DELAYS)} in {delay}s"
+                )
+                time.sleep(delay)
+            else:
+                raise
+
+    raise last_exception
 
 
 def get_next_agent_id(monitor_url, api_session, logger=None):
@@ -28,14 +95,14 @@ def get_next_agent_id(monitor_url, api_session, logger=None):
 
     try:
         url = f"{monitor_url}/api/state/next-agent-id/"
-        response = api_session.post(url, timeout=10)
+        response = api_request_with_retry('post', url, session=api_session, logger=logger)
         response.raise_for_status()
 
         data = response.json()
         if data.get('status') == 'success':
             agent_id = data.get('agent_id')
             logger.info(f"Got next agent ID from persistent state: {agent_id}")
-            return str(agent_id)  # Return as string for consistency
+            return str(agent_id)
         else:
             raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
 
@@ -64,14 +131,14 @@ def get_next_run_number(monitor_url, api_session, logger=None):
 
     try:
         url = f"{monitor_url}/api/state/next-run-number/"
-        response = api_session.post(url, timeout=10)
+        response = api_request_with_retry('post', url, session=api_session, logger=logger)
         response.raise_for_status()
 
         data = response.json()
         if data.get('status') == 'success':
             run_number = data.get('run_number')
             logger.info(f"Got next run number from persistent state: {run_number}")
-            return str(run_number)  # Return as string for consistency
+            return str(run_number)
         else:
             raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
 
@@ -108,7 +175,7 @@ def ensure_namespace(monitor_url, api_session, name, owner=None, logger=None):
     try:
         url = f"{monitor_url}/api/namespaces/ensure/"
         payload = {'name': name, 'owner': owner}
-        response = api_session.post(url, json=payload, timeout=10)
+        response = api_request_with_retry('post', url, session=api_session, logger=logger, json=payload)
         response.raise_for_status()
 
         data = response.json()

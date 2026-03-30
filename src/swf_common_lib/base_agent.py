@@ -13,7 +13,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
-from .api_utils import get_next_agent_id
+from .api_utils import get_next_agent_id, api_request_with_retry
 from .config_utils import load_testbed_config, TestbedConfigError
 
 
@@ -582,35 +582,35 @@ class BaseAgent(stomp.ConnectionListener):
     def _api_request(self, method, endpoint, json_data=None):
         """
         Helper method to make a request to the monitor API.
-        FAILS FAST - raises exception on any API error.
+        Retries on transient failures (connection errors, 502/503/504).
+        Fails immediately on 4xx and redirects.
         """
         url = f"{self.monitor_url}/api{endpoint}"
         try:
-            # Do not follow redirects; 3xx usually indicates upstream auth middleware (e.g., OIDC)
-            response = self.api.request(method, url, json=json_data, timeout=10, allow_redirects=False)
-            # Treat redirect as auth/config problem with a clear message
+            response = api_request_with_retry(
+                method, url, session=self.api, logger=logging.getLogger(__name__),
+                json=json_data, allow_redirects=False,
+            )
             if 300 <= response.status_code < 400:
                 loc = response.headers.get('Location', 'unknown')
                 msg = (f"API redirect (HTTP {response.status_code}) to {loc}. "
                        f"If behind Apache/OIDC, ensure API requests aren't redirected and Authorization is forwarded.")
                 logging.error(msg)
                 raise APIError(msg, response=response, url=url, method=method.upper())
-            response.raise_for_status()  # Raise an exception for bad status codes
+            response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
-            # Check for "already exists" error in subscriber registration
             if hasattr(e, 'response') and e.response is not None and e.response.status_code == 400:
                 response_text = e.response.text.lower()
                 if "already exists" in response_text and "subscriber" in response_text:
-                    # This is a normal "already exists" case for subscriber registration
                     logging.info(f"Resource already exists (normal): {method.upper()} {url}")
                     return {"status": "already_exists"}
-            
+
             logging.error(f"API request FAILED: {method.upper()} {url} - {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logging.error(f"Response status: {e.response.status_code}")
                 logging.error(f"Response body: {e.response.text}")
-            raise APIError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}", 
+            raise APIError(f"Critical API failure - agent cannot continue: {method.upper()} {url} - {e}",
                           response=getattr(e, 'response', None), url=url, method=method.upper()) from e
 
     def send_heartbeat(self):
