@@ -10,8 +10,8 @@ import logging
 import requests
 
 
-RETRY_DELAYS = (2, 4, 8, 20)
-RETRYABLE_STATUS_CODES = {502, 503, 504}
+RETRY_DELAYS = (2, 5, 10, 20, 40, 60)
+RETRYABLE_STATUS_CODES = {404, 500, 502, 503, 504}
 
 
 def api_request_with_retry(method, url, session=None, logger=None, **kwargs):
