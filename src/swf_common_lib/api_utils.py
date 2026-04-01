@@ -79,6 +79,10 @@ def get_next_agent_id(monitor_url, api_session, logger=None):
     """
     Get the next agent ID from persistent state API.
 
+    Retries indefinitely with capped backoff so that a transient API outage
+    does not permanently kill the agent (supervisord would hit startretries
+    and mark the process FATAL).
+
     Args:
         monitor_url (str): Base URL of the swf-monitor service
         api_session (requests.Session): Configured session with auth headers
@@ -86,29 +90,32 @@ def get_next_agent_id(monitor_url, api_session, logger=None):
 
     Returns:
         str: Next agent ID as string
-
-    Raises:
-        RuntimeError: If API call fails or returns error
     """
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    try:
-        url = f"{monitor_url}/api/state/next-agent-id/"
-        response = api_request_with_retry('post', url, session=api_session, logger=logger)
-        response.raise_for_status()
+    url = f"{monitor_url}/api/state/next-agent-id/"
+    attempt = 0
+    while True:
+        try:
+            response = api_request_with_retry('post', url, session=api_session, logger=logger)
+            response.raise_for_status()
 
-        data = response.json()
-        if data.get('status') == 'success':
-            agent_id = data.get('agent_id')
-            logger.info(f"Got next agent ID from persistent state: {agent_id}")
-            return str(agent_id)
-        else:
-            raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
+            data = response.json()
+            if data.get('status') == 'success':
+                agent_id = data.get('agent_id')
+                logger.info(f"Got next agent ID from persistent state: {agent_id}")
+                return str(agent_id)
+            else:
+                raise RuntimeError(f"API returned error: {data.get('error', 'Unknown error')}")
 
-    except Exception as e:
-        logger.error(f"Failed to get next agent ID from API: {e}")
-        raise RuntimeError(f"Critical failure getting agent ID: {e}") from e
+        except Exception as e:
+            attempt += 1
+            delay = min(60, 5 * attempt)  # 5, 10, 15, ... capped at 60s
+            logger.warning(
+                f"Failed to get agent ID (attempt {attempt}): {e} — retrying in {delay}s"
+            )
+            time.sleep(delay)
 
 
 def get_next_run_number(monitor_url, api_session, logger=None):
