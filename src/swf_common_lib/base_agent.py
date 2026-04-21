@@ -321,17 +321,23 @@ class BaseAgent(stomp.ConnectionListener):
             self.set_ready()
 
             # Initial registration/heartbeat
-            self.send_heartbeat()
+            try:
+                self.send_heartbeat()
+            except Exception:
+                logging.warning("Initial heartbeat failed — server may be restarting, will retry")
 
             logging.info(f"{self.agent_name} is running. Press Ctrl+C to stop.")
             while True:
                 time.sleep(60) # Keep the main thread alive, heartbeats can be added here
-                
+
                 # Check connection status and attempt reconnection if needed
                 if not self.mq_connected:
                     self._attempt_reconnect()
-                    
-                self.send_heartbeat()
+
+                try:
+                    self.send_heartbeat()
+                except Exception:
+                    logging.warning("Heartbeat failed — server may be restarting, will retry next cycle")
 
         except KeyboardInterrupt:
             logging.info(f"Stopping {self.agent_name}...")
