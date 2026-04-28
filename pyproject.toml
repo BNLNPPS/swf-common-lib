@@ -12,6 +12,7 @@ dependencies = [
     "python-json-logger",
     "psycopg2-binary",
     "requests"
+    "stomp.py"
 ]
 
 [project.urls]
