@@ -87,6 +87,43 @@ When the monitor service is available, logs are sent to the database via REST AP
 
 Traditional logging utilities for PostgreSQL database integration.
 
+## BaseAgent (`swf_common_lib.base_agent`)
+
+`BaseAgent` is the shared base class for SWF agents: a STOMP consumer that
+connects to ActiveMQ, registers and heartbeats to the monitor, applies namespace
+filtering, and dispatches messages to the subclass's `on_message`. (BaseAgent's
+design choices are recorded in
+`swf-testbed/docs/architecture_and_design_choices.md`; this section documents the
+background-execution API.)
+
+### Background execution (`BaseAgent.run_in_background`)
+
+`BaseAgent` delivers messages on a single STOMP receiver thread, sequentially,
+so a handler that blocks — a subprocess, or a long REST / Rucio / xrootd call —
+stalls every later message, including liveness pings. `run_in_background`
+offloads such work to a bounded thread pool and returns the receiver thread to
+the dispatch loop at once, so the agent stays responsive and can have several
+actions in flight.
+
+It is **opt-in**: an agent that never calls it behaves exactly as before.
+Threads (not asyncio) are used deliberately — the work is blocking
+subprocess/socket I/O and the stack (stomp.py, subprocess) is thread-based.
+
+**`run_in_background(fn, *args, dedup_key=None, label=None, **kwargs)`**
+
+Submit `fn(*args, **kwargs)` to the agent's worker pool and return immediately.
+The wrapper:
+
+- drives **reentrant PROCESSING state** — the agent reports PROCESSING while any
+  background work is in flight and READY when none is;
+- **catches and logs every exception**, so a worker never dies silently;
+- **skips** the call when `dedup_key` names a unit already running, avoiding the
+  duplicate-work race that concurrency introduces.
+
+Control messages (liveness, shutdown) should stay inline on the receiver thread;
+only long-running work is offloaded. Shutdown drains in-flight workers. See
+`swf-monitor/docs/EPICPROD_OPS_AGENT.md` for the first consumer.
+
 ## MQ and Rucio Utility packages
 
 The *mq_comms* and *rucio_comms* packages provide convenient encapsulation of interactions
