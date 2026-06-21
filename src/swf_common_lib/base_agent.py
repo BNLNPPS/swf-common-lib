@@ -11,6 +11,8 @@ import stomp
 import requests
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from .api_utils import get_next_agent_id, api_request_with_retry
@@ -195,6 +197,17 @@ class BaseAgent(stomp.ConnectionListener):
         self.hostname = socket.gethostname()
         self.operational_state = 'STARTING'  # STARTING, READY, PROCESSING, EXITED
 
+        # Background execution (opt-in via run_in_background). The pool is created
+        # lazily, so an agent that never calls run_in_background is unaffected.
+        # See swf-testbed/docs/architecture_and_design_choices.md
+        # § Blocking Handlers and Background Execution.
+        self._bg_executor = None
+        self._bg_max_workers = int(os.getenv('SWF_AGENT_MAX_WORKERS', '4'))
+        self._bg_lock = threading.Lock()     # guards _bg_inflight and _bg_keys
+        self._bg_inflight = 0                # background tasks currently running
+        self._bg_keys = set()                # in-flight dedup keys
+        self._send_lock = threading.Lock()   # serialize bus sends across threads
+
         # Use HTTP URL for REST logging (no auth required)
         self.base_url = (os.getenv('SWF_MONITOR_HTTP_URL') or '').rstrip('/')
         self.mq_host = os.getenv('ACTIVEMQ_HOST', 'localhost')
@@ -351,6 +364,13 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
+            # Drain in-flight background work before reporting EXITED / disconnecting,
+            # so credentialed workers finish (and can still notify over the live bus).
+            # Bounded in practice by each doer's own subprocess timeout.
+            if self._bg_executor is not None:
+                logging.info("Draining background worker pool...")
+                self._bg_executor.shutdown(wait=True)
+
             # Report exit status before disconnecting
             try:
                 self.operational_state = 'EXITED'
@@ -532,6 +552,75 @@ class BaseAgent(stomp.ConnectionListener):
 
         return ProcessingContext()
 
+    def run_in_background(self, fn, *args, dedup_key=None, label=None, **kwargs):
+        """Run ``fn(*args, **kwargs)`` on the agent's bounded worker pool and
+        return immediately, freeing the STOMP receiver thread.
+
+        Opt-in: an agent that never calls this is unaffected. Use it for handler
+        work that blocks — a subprocess, or a long REST / Rucio / xrootd call —
+        so one slow message cannot stall liveness pings or later messages.
+
+        - Reentrant PROCESSING: the agent reports PROCESSING while any background
+          task is in flight, READY when none is.
+        - Every exception in ``fn`` is caught and logged; a worker never dies
+          silently.
+        - ``dedup_key`` (optional): if a task with the same key is already in
+          flight, this call is skipped and returns False — closing the
+          duplicate-work race that concurrency introduces.
+
+        Do not mix with the inline ``processing()`` context manager in the same
+        agent; both drive operational_state. Returns True if enqueued, False if
+        deduplicated or the pool refused the task.
+
+        See swf-testbed/docs/architecture_and_design_choices.md
+        § Blocking Handlers and Background Execution.
+        """
+        label = label or getattr(fn, '__name__', 'task')
+        with self._bg_lock:
+            if dedup_key is not None and dedup_key in self._bg_keys:
+                self.logger.info(
+                    f"{self.agent_name} background '{label}' skipped: "
+                    f"dedup_key {dedup_key!r} already in flight")
+                return False
+            if self._bg_executor is None:
+                self._bg_executor = ThreadPoolExecutor(
+                    max_workers=self._bg_max_workers,
+                    thread_name_prefix=f"{self.agent_type.lower()}-bg")
+            if dedup_key is not None:
+                self._bg_keys.add(dedup_key)
+            self._bg_inflight += 1
+            if self._bg_inflight == 1:
+                self.set_processing()
+            try:
+                self._bg_executor.submit(self._bg_run, fn, args, kwargs, dedup_key, label)
+            except Exception as e:
+                # Pool refused the task — roll back the bookkeeping we just did.
+                self._bg_inflight -= 1
+                if dedup_key is not None:
+                    self._bg_keys.discard(dedup_key)
+                if self._bg_inflight == 0:
+                    self.set_ready()
+                self.logger.error(
+                    f"{self.agent_name} could not enqueue background '{label}': {e}")
+                return False
+        return True
+
+    def _bg_run(self, fn, args, kwargs, dedup_key, label):
+        """Worker-thread wrapper: run the task, swallow nothing, and keep the
+        in-flight count / PROCESSING state correct on the way out."""
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            self.logger.error(
+                f"{self.agent_name} background '{label}' raised: {e}", exc_info=True)
+        finally:
+            with self._bg_lock:
+                self._bg_inflight -= 1
+                if dedup_key is not None:
+                    self._bg_keys.discard(dedup_key)
+                if self._bg_inflight == 0:
+                    self.set_ready()
+
     def get_next_agent_id(self):
         """Get the next agent ID from persistent state API."""
         return get_next_agent_id(self.monitor_url, self.api, logging.getLogger(__name__))
@@ -565,25 +654,26 @@ class BaseAgent(stomp.ConnectionListener):
                 "Configure namespace in testbed.toml to enable namespace filtering."
             )
 
-        try:
-            self.conn.send(body=json.dumps(message_body), destination=destination)
-            logging.info(f"Sent message to '{destination}': {message_body}")
-        except Exception as e:
-            logging.error(f"Failed to send message to '{destination}': {e}")
-            
-            # Check for SSL/connection errors that indicate disconnection
-            if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
-                logging.warning("Connection error detected - attempting recovery")
-                self.mq_connected = False
-                time.sleep(1)  # Brief pause before retry
-                if self._attempt_reconnect():
-                    try:
-                        self.conn.send(body=json.dumps(message_body), destination=destination)
-                        logging.info(f"Message sent successfully after reconnection to '{destination}'")
-                    except Exception as retry_e:
-                        logging.error(f"Retry failed after reconnection: {retry_e}")
-                else:
-                    logging.error("Reconnection failed - message lost")
+        with self._send_lock:
+            try:
+                self.conn.send(body=json.dumps(message_body), destination=destination)
+                logging.info(f"Sent message to '{destination}': {message_body}")
+            except Exception as e:
+                logging.error(f"Failed to send message to '{destination}': {e}")
+
+                # Check for SSL/connection errors that indicate disconnection
+                if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
+                    logging.warning("Connection error detected - attempting recovery")
+                    self.mq_connected = False
+                    time.sleep(1)  # Brief pause before retry
+                    if self._attempt_reconnect():
+                        try:
+                            self.conn.send(body=json.dumps(message_body), destination=destination)
+                            logging.info(f"Message sent successfully after reconnection to '{destination}'")
+                        except Exception as retry_e:
+                            logging.error(f"Retry failed after reconnection: {retry_e}")
+                    else:
+                        logging.error("Reconnection failed - message lost")
 
     def _api_request(self, method, endpoint, json_data=None):
         """
