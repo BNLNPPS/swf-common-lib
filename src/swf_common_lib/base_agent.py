@@ -201,11 +201,11 @@ class BaseAgent(stomp.ConnectionListener):
         # lazily, so an agent that never calls run_in_background is unaffected.
         # See swf-testbed/docs/architecture_and_design_choices.md
         # § Blocking Handlers and Background Execution.
-        self._bg_executor = None
+        self._bg_executor: Optional[ThreadPoolExecutor] = None
         self._bg_max_workers = int(os.getenv('SWF_AGENT_MAX_WORKERS', '4'))
         self._bg_lock = threading.Lock()     # guards _bg_inflight and _bg_keys
         self._bg_inflight = 0                # background tasks currently running
-        self._bg_keys = set()                # in-flight dedup keys
+        self._bg_keys: set[str] = set()      # in-flight dedup keys
         self._send_lock = threading.Lock()   # serialize bus sends across threads
 
         # Use HTTP URL for REST logging (no auth required)
