@@ -1,11 +1,13 @@
 # swf-common-lib
 
-Common libraries and utilities for the swf-testbed ePIC streaming workflow testbed project.
+The library of the swf platform: code shared across the swf applications and their agents.
 
 ## Overview
 
-This library provides shared functionality for SWF agents, including logging utilities and REST API
-integration for the swf-monitor service. Also included are utility classes wrapping MQ and Rucio communications.
+This library provides shared functionality for swf agents and services across the platform's applications —
+the streaming workflow testbed and the epicprod production system — including the agent base class,
+logging utilities, and REST API integration for the swf-monitor service. Also included are utility classes
+wrapping MQ and Rucio communications.
 swf-common-lib is part of the ePIC Workflow Management System (WFMS); the official system-level documentation is
 at <https://epic-wfms-docs.readthedocs.io>.
 
