@@ -1,6 +1,6 @@
 # swf-common-lib
 
-The platform library of the ePIC Workflow Management System (WFMS): code shared across the swf applications and their agents.
+The library of the swf platform: code shared across the swf applications and their agents.
 
 ## Overview
 
