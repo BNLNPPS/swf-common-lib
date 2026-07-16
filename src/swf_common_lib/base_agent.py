@@ -32,8 +32,15 @@ def setup_environment():
     """Auto-activate venv and load environment variables."""
     script_dir = Path(__file__).resolve().parent.parent.parent.parent / "swf-testbed"
     
-    # Auto-activate virtual environment if not already active
-    if "VIRTUAL_ENV" not in os.environ:
+    # Auto-activate the dev venv only when running on a bare interpreter.
+    # Running inside any venv counts as active — sys.prefix differs from
+    # base_prefix — whether or not VIRTUAL_ENV is exported: systemd units
+    # launch the deployed venv python with no activation environment, and
+    # repointing sys.executable at the dev venv from there sent every
+    # production doer subprocess to the dev venv and its editable dev
+    # trees (found 2026-07-12).
+    already_in_venv = sys.prefix != getattr(sys, 'base_prefix', sys.prefix)
+    if not already_in_venv and "VIRTUAL_ENV" not in os.environ:
         venv_path = script_dir / ".venv"
         if venv_path.exists():
             print("🔧 Auto-activating virtual environment...")
