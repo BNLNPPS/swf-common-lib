@@ -1,0 +1,16 @@
+name: swf-common-lib CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-test:
+    uses: BNLNPPS/swf-testbed/.github/workflows/integration-test.yml@main
+    with:
+      swf_testbed_ref: main
+      swf_monitor_ref: main
+      swf_common_lib_repo: ${{ github.repository }}
+      swf_common_lib_ref: ${{ github.sha }}
