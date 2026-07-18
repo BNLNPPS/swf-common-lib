@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import zlib
+from typing import Optional
 
 from rucio.client import Client as RucioClient
 from rucio.common.exception import (
@@ -86,6 +87,28 @@ def generate_vuid(scope: str, name: str) -> str:
 # ---------------------------------------------------------------------------
 # Checksum / file helpers
 # ---------------------------------------------------------------------------
+
+def calculate_file_checksum(file_path: str, algorithm: str = 'md5', chunk_size: int = 4096) -> str:
+    """
+    Calculate the checksum of a file using the specified hash algorithm.
+
+    Args:
+        file_path:  Path to the file.
+        algorithm:  Hash algorithm name (e.g. ``'md5'``, ``'sha256'``).
+        chunk_size: Size of chunks to read from the file.
+
+    Returns:
+        Hex-encoded checksum string.
+    """
+    h = hashlib.new(algorithm)
+    with open(file_path, 'rb') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def calculate_adler32_from_file(file_path, chunk_size=4096):
     """
@@ -171,7 +194,7 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
 # Dataset operations  (standalone equivalents of DatasetManager methods)
 # ---------------------------------------------------------------------------
 
-def create_dataset(dataset_name: str, lifetime_days: int = None,
+def create_dataset(dataset_name: str, lifetime_days: Optional[int] = None,
                    open_dataset: bool = True, client=None):
     """
     Create a Rucio dataset.
@@ -240,7 +263,7 @@ def create_dataset(dataset_name: str, lifetime_days: int = None,
 # ---------------------------------------------------------------------------
 
 def add_files_to_dataset(files, dataset_name: str,
-                         dataset_scope: str = None, rse: str = None,
+                         dataset_scope: Optional[str] = None, rse: Optional[str] = None,
                          client=None):
     """
     Add files to a Rucio dataset.
