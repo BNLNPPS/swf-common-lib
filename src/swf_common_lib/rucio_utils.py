@@ -260,7 +260,6 @@ def create_dataset(dataset_name: str, lifetime_days: Optional[int] = None,
 
     except Exception as e:
         logger.error(f"Failed to create dataset {dataset_name}: {e}")
-        print(f"✗ Error creating dataset: {e}")
         return None
 
 
