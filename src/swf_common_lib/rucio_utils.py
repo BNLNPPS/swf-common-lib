@@ -12,6 +12,7 @@ from typing import Optional
 from rucio.client import Client as RucioClient
 from rucio.common.exception import (
     DataIdentifierAlreadyExists,
+    DataIdentifierNotFound,
     FileAlreadyExists,
     RSENotFound,
 )
@@ -131,9 +132,8 @@ def calculate_adler32_from_file(file_path, chunk_size=4096):
                     break
                 adler32_checksum = zlib.adler32(chunk, adler32_checksum)
         return adler32_checksum & 0xffffffff  # Ensure 32-bit unsigned result
-    except:
-        print(f"Adler-32: problem with file {file_path}, exiting")
-        exit(-2)
+    except Exception as e:
+        raise OSError(f"Adler-32: problem with file {file_path}") from e
 
 def register_file_on_rse(data_obj, file_path: str, file_name: str):
     """
@@ -161,10 +161,12 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
         # Step 2: Check if DID already exists
         try:
             existing_did = data_obj.rucio_did_client.get_did(data_obj.rucio_scope, file_name)
-            print(f"DID already exists: {existing_did}")
-        except:
+            logger.info(f"DID already exists: {existing_did}")
+        except DataIdentifierNotFound:
             # DID doesn't exist, we'll create it
-            print("DID doesn't exist yet, will create new one")
+            logger.info("DID doesn't exist yet, will create new one")
+        except Exception as e:
+            logger.warning(f"Unexpected error checking DID {data_obj.rucio_scope}:{file_name}: {e}")
 
         dataset_folder = data_obj.dataset
 
