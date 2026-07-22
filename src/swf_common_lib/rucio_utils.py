@@ -142,7 +142,7 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
     This is a helper method to register a file on RSE after it has been uploaded.
 
     It expects an object with some necessary attributes, e.g. the "data object" defined in relevant class.
-    Attributes to be harvested from the "data object": client, did_client, replica_client, dataset, rse: str, scope: str
+    Attributes to be harvested from the "data object": client, rucio_did_client, replica_client, dataset, rse: str, scope: str
     """
     
     adler = calculate_adler32_from_file(file_path)
@@ -160,7 +160,7 @@ def register_file_on_rse(data_obj, file_path: str, file_name: str):
       
         # Step 2: Check if DID already exists
         try:
-            existing_did = data_obj.did_client.get_did(data_obj.rucio_scope, file_name)
+            existing_did = data_obj.rucio_did_client.get_did(data_obj.rucio_scope, file_name)
             print(f"DID already exists: {existing_did}")
         except:
             # DID doesn't exist, we'll create it
