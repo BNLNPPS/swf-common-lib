@@ -247,9 +247,8 @@ def create_dataset(dataset_name: str, lifetime_days: Optional[int] = None,
                 pass  # may already be open
 
         # Generate identifiers
-        duid = generate_vuid(scope, name)
         vuid = generate_vuid(scope, name)
-
+        duid = vuid
         result = {
             'scope': scope,
             'name':  name,
