@@ -231,6 +231,13 @@ def create_dataset(dataset_name: str, lifetime_days: Optional[int] = None,
             logger.info(f"Dataset created: {scope}:{name}")
         except DataIdentifierAlreadyExists:
             logger.info(f"Dataset already exists: {scope}:{name}")
+            # Apply lifetime to existing dataset if requested
+            if lifetime_days is not None:
+                client.set_metadata(scope=scope, name=name,
+                                    key='lifetime',
+                                    value=lifetime_days * 86400)
+                logger.info(f"Updated lifetime for existing dataset: "
+                            f"{scope}:{name} -> {lifetime_days} days")
 
         # Set open/closed status
         if open_dataset:
