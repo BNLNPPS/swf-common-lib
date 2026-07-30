@@ -575,6 +575,14 @@ class BaseAgent(stomp.ConnectionListener):
           flight, this call is skipped and returns False — closing the
           duplicate-work race that concurrency introduces.
 
+        Calls with different keys can run concurrently: the pool has
+        ``SWF_AGENT_MAX_WORKERS`` threads (default 4). ``dedup_key`` is not a
+        lock and does not preserve the receiver thread's former serial
+        semantics. For a safe first migration, set ``SWF_AGENT_MAX_WORKERS=1``.
+        With a larger pool, keep per-message state local to ``fn`` and protect
+        any non-thread-safe library or CLI with a lock acquired inside the
+        background function, never in the receiver-thread handler.
+
         Do not mix with the inline ``processing()`` context manager in the same
         agent; both drive operational_state. Returns True if enqueued, False if
         deduplicated or the pool refused the task.
