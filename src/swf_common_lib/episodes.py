@@ -123,6 +123,19 @@ class EpisodeDefinition:
         run_id = message.get("run_id")
         return f"run {run_id}" if run_id else ""
 
+    def started_at(self, message: Dict) -> str:
+        """Timezone-aware ISO start for the episode. The default is the
+        arrival time; definitions that trust their messages' stamps
+        override this with a normalized message time."""
+        return utc_now_iso()
+
+    def ended_at(self, message: Dict) -> str:
+        """Timezone-aware ISO end for the episode, from the end-signal
+        message. Same default and override contract as started_at —
+        essential for backfilled episodes, whose close must carry the
+        recorded end rather than the replay time."""
+        return utc_now_iso()
+
     def event_from_message(self, message: Dict) -> Optional[Dict]:
         """Bus message -> event dict ``{time, kind, participant,
         counterpart?, payload?}``, or None to ignore the message."""
@@ -156,6 +169,7 @@ class EpisodeContext:
         self.episode_id = episode_id
         self.opened_at = utc_now_iso()
         self.end_seen_at: Optional[str] = None
+        self.ended_at: Optional[str] = None
         self.first_message: Optional[Dict] = None
         self.last_message: Optional[Dict] = None
         #: Scratch space for the definition (run ids, task ids, ...).
@@ -202,7 +216,7 @@ class EpisodeBuilder:
                 self.ingest.open(
                     scope=definition.scope,
                     episode_id=execution_id,
-                    started_at=message.get("timestamp") or utc_now_iso(),
+                    started_at=definition.started_at(message),
                     label=definition.label(message),
                     kind=definition.workflow_name,
                 )
@@ -224,6 +238,7 @@ class EpisodeBuilder:
                 )
             if definition.is_end(message):
                 context.end_seen_at = utc_now_iso()
+                context.ended_at = definition.ended_at(message)
             return True
         except EpisodeIngestError as exc:
             logger.error("episode ingest failed for %s: %s",
@@ -254,7 +269,7 @@ class EpisodeBuilder:
                 self.ingest.close(
                     scope=definition.scope,
                     episode_id=execution_id,
-                    ended_at=context.end_seen_at,
+                    ended_at=context.ended_at or context.end_seen_at,
                     summary=definition.summary(context),
                 )
             except EpisodeIngestError as exc:
