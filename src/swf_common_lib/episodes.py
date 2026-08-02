@@ -160,6 +160,9 @@ class EpisodeContext:
         self.last_message: Optional[Dict] = None
         #: Scratch space for the definition (run ids, task ids, ...).
         self.notes: Dict = {}
+        #: Participant ids already reported, so steady message traffic
+        #: does not re-upsert its sender on every message.
+        self.seen_participants: set = set()
 
 
 class EpisodeBuilder:
@@ -205,7 +208,13 @@ class EpisodeBuilder:
                 )
             context.last_message = message
             event = definition.event_from_message(message)
-            participants = definition.participants_from_message(message)
+            participants = [
+                entry for entry in definition.participants_from_message(message)
+                if not (entry.get("id") in context.seen_participants
+                        and "died_at" not in entry)
+            ]
+            for entry in participants:
+                context.seen_participants.add(entry.get("id"))
             if event or participants:
                 self.ingest.append(
                     scope=definition.scope,
