@@ -477,19 +477,19 @@ class BaseAgent(stomp.ConnectionListener):
             # Namespace filtering
             msg_namespace = message_data.get('namespace')
             if self.namespace and msg_namespace and msg_namespace != self.namespace:
-                logging.debug(
+                self.logger.debug(
                     f"Ignoring message from namespace '{msg_namespace}' (ours: '{self.namespace}')"
                 )
                 return None, None
 
             if msg_type not in known_types:
-                logging.info(f"{self.agent_type} agent received unknown message type: {msg_type}", extra={"msg_type": msg_type})
+                self.logger.info(f"{self.agent_type} agent received unknown message type: {msg_type}", extra={"msg_type": msg_type})
             else:
-                logging.info(f"{self.agent_type} agent received message: {msg_type}")
+                self.logger.info(f"{self.agent_type} agent received message: {msg_type}")
 
             return message_data, msg_type
         except json.JSONDecodeError as e:
-            logging.error(f"CRITICAL: Failed to parse message JSON: {e}")
+            self.logger.error(f"CRITICAL: Failed to parse message JSON: {e}")
             raise RuntimeError(f"Message parsing failed - agent cannot continue: {e}") from e
 
     # -------------------------------------------------------------------------
