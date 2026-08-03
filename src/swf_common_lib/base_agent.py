@@ -651,6 +651,9 @@ class BaseAgent(stomp.ConnectionListener):
 
         Raises:
             ValueError: If destination doesn't have /queue/ or /topic/ prefix
+            Exception: If the send fails and a reconnect-and-resend also
+                fails. A lost message is the caller's problem — swallowing
+                it here abandons downstream state (run 102780, 2026-07-30).
         """
         # Validate destination has explicit prefix
         if not destination.startswith('/queue/') and not destination.startswith('/topic/'):
@@ -674,21 +677,22 @@ class BaseAgent(stomp.ConnectionListener):
                 self.conn.send(body=json.dumps(message_body), destination=destination)
                 logging.info(f"Sent message to '{destination}': {message_body}")
             except Exception as e:
+                # Any send failure warrants one reconnect-and-resend; no
+                # error-string filtering — NotConnectedException stringifies
+                # without the word 'connection' and was slipping through.
                 logging.error(f"Failed to send message to '{destination}': {e}")
-
-                # Check for SSL/connection errors that indicate disconnection
-                if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
-                    logging.warning("Connection error detected - attempting recovery")
-                    self.mq_connected = False
-                    time.sleep(1)  # Brief pause before retry
-                    if self._attempt_reconnect():
-                        try:
-                            self.conn.send(body=json.dumps(message_body), destination=destination)
-                            logging.info(f"Message sent successfully after reconnection to '{destination}'")
-                        except Exception as retry_e:
-                            logging.error(f"Retry failed after reconnection: {retry_e}")
-                    else:
-                        logging.error("Reconnection failed - message lost")
+                self.mq_connected = False
+                time.sleep(1)  # Brief pause before retry
+                if not self._attempt_reconnect():
+                    logging.error(
+                        f"Reconnection failed - could not send to '{destination}'")
+                    raise
+                try:
+                    self.conn.send(body=json.dumps(message_body), destination=destination)
+                    logging.info(f"Message sent successfully after reconnection to '{destination}'")
+                except Exception as retry_e:
+                    logging.error(f"Retry failed after reconnection: {retry_e}")
+                    raise
 
     def _api_request(self, method, endpoint, json_data=None):
         """
