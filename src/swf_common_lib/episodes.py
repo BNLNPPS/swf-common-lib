@@ -92,6 +92,28 @@ class MonitorEpisodeIngest:
             "ended_at": ended_at, "summary": summary or {},
         })
 
+    def _get(self, path: str) -> Dict:
+        url = f"{self.base_url}/api/snapper/{path}"
+        try:
+            response = self.session.get(url, timeout=30)
+        except requests.RequestException as exc:
+            raise EpisodeIngestError(f"GET {url} failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise EpisodeIngestError(
+                f"GET {url} returned {response.status_code}: "
+                f"{response.text[:500]}")
+        return response.json()
+
+    def open_episodes(self, scope: str) -> List[Dict]:
+        """The scope's episodes without a recorded end."""
+        listing = self._get(f"{scope}/episodes/")
+        return [e for e in listing.get("episodes", [])
+                if not e.get("ended_at")]
+
+    def episode(self, scope: str, episode_id: str) -> Dict:
+        """One episode's full record."""
+        return self._get(f"{scope}/episodes/{episode_id}/")
+
 
 class EpisodeDefinition:
     """The workflow-specific contract. Subclass per workflow.
@@ -197,11 +219,58 @@ class EpisodeBuilder:
         self.ingest = ingest
         self.active: Dict[str, EpisodeContext] = {}
 
+    def adopt_open_episodes(self) -> int:
+        """Adopt the builder identity's open episodes, so a restarted
+        builder resumes what its predecessor left live: an episode
+        whose end signal already passed is driven to completion and
+        close by the next ticks; one still mid-flight keeps appending
+        as its messages arrive. Returns the number adopted."""
+        adopted = 0
+        scopes = {d.scope for d in self.definitions if d.scope}
+        for scope in scopes:
+            try:
+                open_records = self.ingest.open_episodes(scope)
+            except EpisodeIngestError as exc:
+                logger.error("open-episode listing failed for %s: %s",
+                             scope, exc)
+                continue
+            for entry in open_records:
+                episode_id = entry.get("episode_id")
+                if not episode_id or episode_id in self.active:
+                    continue
+                definition = next(
+                    (d for d in self.definitions
+                     if d.scope == scope
+                     and d.workflow_name == entry.get("kind")), None)
+                if definition is None:
+                    continue
+                try:
+                    record = self.ingest.episode(scope, episode_id)
+                except EpisodeIngestError as exc:
+                    logger.error("episode fetch failed for %s: %s",
+                                 episode_id, exc)
+                    continue
+                context = EpisodeContext(definition, episode_id)
+                for event in record.get("events", []):
+                    context.seen_participants.add(event.get("participant"))
+                    if definition.is_end({"msg_type": event.get("kind")}):
+                        context.end_seen_at = utc_now_iso()
+                        context.ended_at = event.get("time")
+                self.active[episode_id] = context
+                adopted += 1
+                logger.info("adopted open episode %s (%s)", episode_id,
+                            "end seen" if context.end_seen_at
+                            else "still live")
+        return adopted
+
     def handle_message(self, message: Dict) -> bool:
         """Route one bus message; returns True if it joined an episode."""
         execution_id = message.get("execution_id")
         if not execution_id:
             return False
+        # Arrival stamp: the fallback event time for messages whose
+        # writer stamps no timestamp of its own.
+        message.setdefault("_received_at", utc_now_iso())
         for definition in self.definitions:
             if definition.matches(message):
                 break
