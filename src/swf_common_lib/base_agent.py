@@ -575,6 +575,14 @@ class BaseAgent(stomp.ConnectionListener):
           flight, this call is skipped and returns False — closing the
           duplicate-work race that concurrency introduces.
 
+        Calls with different keys can run concurrently: the pool has
+        ``SWF_AGENT_MAX_WORKERS`` threads (default 4). ``dedup_key`` is not a
+        lock and does not preserve the receiver thread's former serial
+        semantics. For a safe first migration, set ``SWF_AGENT_MAX_WORKERS=1``.
+        With a larger pool, keep per-message state local to ``fn`` and protect
+        any non-thread-safe library or CLI with a lock acquired inside the
+        background function, never in the receiver-thread handler.
+
         Do not mix with the inline ``processing()`` context manager in the same
         agent; both drive operational_state. Returns True if enqueued, False if
         deduplicated or the pool refused the task.
@@ -643,6 +651,9 @@ class BaseAgent(stomp.ConnectionListener):
 
         Raises:
             ValueError: If destination doesn't have /queue/ or /topic/ prefix
+            Exception: If the send fails and a reconnect-and-resend also
+                fails. A lost message is the caller's problem — swallowing
+                it here abandons downstream state (run 102780, 2026-07-30).
         """
         # Validate destination has explicit prefix
         if not destination.startswith('/queue/') and not destination.startswith('/topic/'):
@@ -666,21 +677,22 @@ class BaseAgent(stomp.ConnectionListener):
                 self.conn.send(body=json.dumps(message_body), destination=destination)
                 logging.info(f"Sent message to '{destination}': {message_body}")
             except Exception as e:
+                # Any send failure warrants one reconnect-and-resend; no
+                # error-string filtering — NotConnectedException stringifies
+                # without the word 'connection' and was slipping through.
                 logging.error(f"Failed to send message to '{destination}': {e}")
-
-                # Check for SSL/connection errors that indicate disconnection
-                if any(error_type in str(e).lower() for error_type in ['ssl', 'eof', 'connection', 'broken pipe']):
-                    logging.warning("Connection error detected - attempting recovery")
-                    self.mq_connected = False
-                    time.sleep(1)  # Brief pause before retry
-                    if self._attempt_reconnect():
-                        try:
-                            self.conn.send(body=json.dumps(message_body), destination=destination)
-                            logging.info(f"Message sent successfully after reconnection to '{destination}'")
-                        except Exception as retry_e:
-                            logging.error(f"Retry failed after reconnection: {retry_e}")
-                    else:
-                        logging.error("Reconnection failed - message lost")
+                self.mq_connected = False
+                time.sleep(1)  # Brief pause before retry
+                if not self._attempt_reconnect():
+                    logging.error(
+                        f"Reconnection failed - could not send to '{destination}'")
+                    raise
+                try:
+                    self.conn.send(body=json.dumps(message_body), destination=destination)
+                    logging.info(f"Message sent successfully after reconnection to '{destination}'")
+                except Exception as retry_e:
+                    logging.error(f"Retry failed after reconnection: {retry_e}")
+                    raise
 
     def _api_request(self, method, endpoint, json_data=None):
         """
