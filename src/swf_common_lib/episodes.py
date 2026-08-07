@@ -347,6 +347,8 @@ class EpisodeBuilder:
             del self.active[execution_id]
 
     def _deadline_passed(self, context: EpisodeContext) -> bool:
+        if context.end_seen_at is None:
+            return False
         seen = datetime.fromisoformat(context.end_seen_at)
         elapsed = datetime.now(timezone.utc) - seen
         return elapsed.total_seconds() > (
