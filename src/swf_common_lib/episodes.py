@@ -66,7 +66,12 @@ class MonitorEpisodeIngest:
                 f"POST {url} returned {response.status_code}: "
                 f"{response.text[:500]}"
             )
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise EpisodeIngestError(
+                f"POST {url} returned non-JSON: {response.text[:200]}"
+            ) from exc
 
     def open(self, scope: str, episode_id: str, started_at: str,
              label: str = "", kind: str = "",
@@ -102,7 +107,12 @@ class MonitorEpisodeIngest:
             raise EpisodeIngestError(
                 f"GET {url} returned {response.status_code}: "
                 f"{response.text[:500]}")
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise EpisodeIngestError(
+                f"GET {url} returned non-JSON: {response.text[:200]}"
+            ) from exc
 
     def open_episodes(self, scope: str) -> List[Dict]:
         """The scope's episodes without a recorded end."""
@@ -271,12 +281,12 @@ class EpisodeBuilder:
         # Arrival stamp: the fallback event time for messages whose
         # writer stamps no timestamp of its own.
         message.setdefault("_received_at", utc_now_iso())
-        for definition in self.definitions:
-            if definition.matches(message):
-                break
-        else:
-            return False
         try:
+            for definition in self.definitions:
+                if definition.matches(message):
+                    break
+            else:
+                return False
             context = self.active.get(execution_id)
             if context is None:
                 context = EpisodeContext(definition, execution_id)
@@ -313,6 +323,12 @@ class EpisodeBuilder:
             logger.error("episode ingest failed for %s: %s",
                          execution_id, exc)
             return False
+        except Exception:
+            # A definition hook failing on one malformed message must
+            # not take down the listening agent.
+            logger.exception("episode handling failed for %s",
+                             execution_id)
+            return False
 
     def tick(self) -> None:
         """Drive pending completions; safe to call at any cadence."""
@@ -335,15 +351,24 @@ class EpisodeBuilder:
                     "episode %s closed at completion deadline with the "
                     "completion pass unfinished", execution_id)
             try:
+                summary = definition.summary(context)
+            except Exception as exc:
+                logger.error("episode summary failed for %s: %s",
+                             execution_id, exc)
+                summary = {}
+            try:
                 self.ingest.close(
                     scope=definition.scope,
                     episode_id=execution_id,
                     ended_at=context.ended_at or context.end_seen_at,
-                    summary=definition.summary(context),
+                    summary=summary,
                 )
             except EpisodeIngestError as exc:
+                # A failed close keeps the episode active for retry on
+                # a later tick; adoption after restart covers the rest.
                 logger.error("episode close failed for %s: %s",
                              execution_id, exc)
+                continue
             del self.active[execution_id]
 
     def _deadline_passed(self, context: EpisodeContext) -> bool:
