@@ -195,9 +195,3 @@ mutable state or when the whole operation was designed to be serial.
 Control messages (liveness, shutdown) should stay inline on the receiver thread;
 only long-running work is offloaded. Shutdown drains in-flight workers. See
 `swf-monitor/docs/EPICPROD_OPS_AGENT.md` for the first consumer.
-
-## MQ and Rucio Utility packages
-
-The *mq_comms* and *rucio_comms* packages provide convenient encapsulation of interactions
-with the ActiveMQ and Rucio systems, respectively. Each folder contains it's own README file
-with more details.
