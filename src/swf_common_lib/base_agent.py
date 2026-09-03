@@ -99,7 +99,7 @@ if _level_name not in logging._nameToLevel:
 else:
     _level = logging._nameToLevel[_level_name]
 
-logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - [%(threadName)s] - %(message)s')
 
 # STOMP logging is very chatty; enable only if explicitly requested
 stomp_logger = logging.getLogger('stomp')
@@ -126,7 +126,8 @@ class BaseAgent(stomp.ConnectionListener):
     # Standard workflow message types
     WORKFLOW_MESSAGE_TYPES = {
         'run_imminent', 'start_run', 'pause_run', 'resume_run', 'end_run',
-        'stf_gen', 'stf_ready', 'tf_file_registered'
+        'stf_gen', 'stf_ready', 'tf_file_registered', 'slice', 'slice_result',
+        'heartbeat'
     }
 
     def __init__(self, agent_type, subscription_queue, debug=False,
