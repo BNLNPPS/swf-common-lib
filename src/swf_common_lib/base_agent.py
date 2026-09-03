@@ -99,7 +99,7 @@ if _level_name not in logging._nameToLevel:
 else:
     _level = logging._nameToLevel[_level_name]
 
-logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logging.basicConfig(level=_level, format='%(asctime)s - %(levelname)s - %(name)s - [%(threadName)s] - %(message)s')
 
 # STOMP logging is very chatty; enable only if explicitly requested
 stomp_logger = logging.getLogger('stomp')
