@@ -124,12 +124,74 @@ The wrapper:
 - **skips** the call when `dedup_key` names a unit already running, avoiding the
   duplicate-work race that concurrency introduces.
 
+#### Concurrency contract and safe migration
+
+`run_in_background` changes two things independently:
+
+1. the STOMP receiver becomes responsive because work moves off that thread;
+2. unless configured otherwise, different background calls may run
+   concurrently.
+
+The pool uses `SWF_AGENT_MAX_WORKERS`, defaulting to **4**. Calls with different
+`dedup_key` values can therefore overlap. A dedup key only suppresses a second
+copy of the *same* in-flight unit; it is not a mutex, queue, or serialization
+key.
+
+For the first migration of an existing serial handler, set:
+
+```bash
+export SWF_AGENT_MAX_WORKERS=1
+```
+
+This keeps the receiver and heartbeats responsive while preserving the
+handler's former one-at-a-time execution. Increase the worker count only after
+auditing the complete doer path for concurrency:
+
+- keep run IDs, dataset names, temporary paths, and other per-message values in
+  function locals instead of mutable `self.*` fields;
+- do not concurrently change the process working directory or environment;
+- use unique temporary directories and filenames;
+- verify that libraries, command wrappers, clients, and shared sessions are
+  thread-safe;
+- retain a semantic `dedup_key` even when execution is serialized, because it
+  prevents duplicate delivery of the same unit.
+
+If most work is safe to overlap but one component is not, serialize that
+component with a lock owned by the agent:
+
+```python
+import threading
+
+class ProcessingAgent(BaseAgent):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._prun_lock = threading.Lock()
+
+    def on_message(self, frame):
+        message = decode_and_validate(frame)
+        self.run_in_background(
+            self._do_submit,
+            message,
+            dedup_key=f"submit:{message['run_id']}:{message['site']}",
+            label="submit PanDA task",
+        )
+
+    def _do_submit(self, message):
+        # Per-message values stay local. Independent preparation may overlap.
+        prun_args = build_prun_args(message)
+        with self._prun_lock:
+            # Protect the complete non-thread-safe operation, including its
+            # sandbox creation and submission-side process-global state.
+            params = PrunScript.main(True, prun_args)
+            return submit_task(params)
+```
+
+Acquire the lock in the background doer, not in `on_message`; taking it on the
+receiver thread recreates the heartbeat problem. Use one process-wide lock for
+a process-global library such as `PrunScript`, not one lock per site. Setting
+`SWF_AGENT_MAX_WORKERS=1` is preferable when the agent still has broader shared
+mutable state or when the whole operation was designed to be serial.
+
 Control messages (liveness, shutdown) should stay inline on the receiver thread;
 only long-running work is offloaded. Shutdown drains in-flight workers. See
 `swf-monitor/docs/EPICPROD_OPS_AGENT.md` for the first consumer.
-
-## MQ and Rucio Utility packages
-
-The *mq_comms* and *rucio_comms* packages provide convenient encapsulation of interactions
-with the ActiveMQ and Rucio systems, respectively. Each folder contains it's own README file
-with more details.
