@@ -126,7 +126,7 @@ class BaseAgent(stomp.ConnectionListener):
     # Standard workflow message types
     WORKFLOW_MESSAGE_TYPES = {
         'run_imminent', 'start_run', 'pause_run', 'resume_run', 'end_run',
-        'stf_gen', 'stf_ready', 'tf_file_registered'
+        'stf_gen', 'stf_ready', 'tf_file_registered', 'slice', 'slice_result'
     }
 
     def __init__(self, agent_type, subscription_queue, debug=False,
