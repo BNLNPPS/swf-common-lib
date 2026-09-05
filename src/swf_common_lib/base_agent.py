@@ -213,6 +213,7 @@ class BaseAgent(stomp.ConnectionListener):
         self._bg_lock = threading.Lock()     # guards _bg_inflight and _bg_keys
         self._bg_inflight = 0                # background tasks currently running
         self._bg_keys: set[str] = set()      # in-flight dedup keys
+        self._stopping = False               # a stop signal was received; draining
         self._send_lock = threading.Lock()   # serialize bus sends across threads
 
         # Use HTTP URL for REST logging (no auth required)
@@ -294,6 +295,12 @@ class BaseAgent(stomp.ConnectionListener):
         # Register signal handlers for graceful shutdown
         def signal_handler(signum, frame):
             sig_name = signal.Signals(signum).name
+            if self._stopping:
+                # A second stop signal during the drain changes nothing: the
+                # work in flight finishes first, then the agent exits.
+                logging.info(f"Received {sig_name} while draining; finishing work in flight first")
+                return
+            self._stopping = True
             logging.info(f"Received {sig_name}, initiating graceful shutdown...")
             raise KeyboardInterrupt(f"Received {sig_name}")
 
@@ -371,11 +378,30 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
-            # Drain in-flight background work before reporting EXITED / disconnecting,
-            # so credentialed workers finish (and can still notify over the live bus).
-            # Bounded in practice by each doer's own subprocess timeout.
+            # Drain before reporting EXITED / disconnecting: wait until no
+            # background work is in flight, with the pool open and the queue
+            # still consumed, so a doer already running finishes (and can still
+            # notify over the live bus) and a message that arrives meanwhile is
+            # worked, never consumed and dropped. Then stop consuming, so what
+            # arrives next waits in the queue for the successor, and close the
+            # pool. Bounded in practice by each doer's own subprocess timeout.
             if self._bg_executor is not None:
-                logging.info("Draining background worker pool...")
+                logging.info("Draining background work...")
+                last_report = 0.0
+                while True:
+                    with self._bg_lock:
+                        inflight = self._bg_inflight
+                    if inflight == 0:
+                        break
+                    if time.monotonic() - last_report >= 30:
+                        logging.info(f"Draining: {inflight} background task(s) in flight")
+                        last_report = time.monotonic()
+                    time.sleep(1)
+                try:
+                    if self.mq_connected:
+                        self.conn.unsubscribe(id=1)
+                except Exception as e:
+                    logging.warning(f"Unsubscribe before exit failed: {e}")
                 self._bg_executor.shutdown(wait=True)
 
             # Report exit status before disconnecting

@@ -193,8 +193,14 @@ a process-global library such as `PrunScript`, not one lock per site. Setting
 mutable state or when the whole operation was designed to be serial.
 
 Control messages (liveness, shutdown) should stay inline on the receiver thread;
-only long-running work is offloaded. Shutdown drains in-flight workers. See
-`swf-monitor/docs/EPICPROD_OPS_AGENT.md` for the first consumer.
+only long-running work is offloaded. A stop signal drains: the agent keeps
+consuming and working until no background task is in flight, then unsubscribes
+(what arrives next waits in the queue for the successor), closes the pool,
+reports EXITED and exits; a second stop signal during the drain changes nothing.
+Run the agent under a unit whose stop signals only the agent process
+(`KillMode=mixed`) with a stop timeout above the longest doer's own, so a stop
+never kills a working doer. See `swf-epicprod/docs/EPICPROD_OPS.md` for the
+first consumer.
 
 ## MQ and Rucio Utility packages
 
