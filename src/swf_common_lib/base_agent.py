@@ -214,6 +214,10 @@ class BaseAgent(stomp.ConnectionListener):
         self._bg_inflight = 0                # background tasks currently running
         self._bg_keys: set[str] = set()      # in-flight dedup keys
         self._stopping = False               # a stop signal was received; draining
+        # How long a shutdown waits for work already running before it exits
+        # anyway. An operations agent that cannot be stopped promptly is a
+        # wedged agent, and a deploy must cost seconds, not a doer's runtime.
+        self._drain_limit_s = int(os.getenv('SWF_AGENT_DRAIN_LIMIT_S', '60'))
         self._send_lock = threading.Lock()   # serialize bus sends across threads
 
         # Use HTTP URL for REST logging (no auth required)
@@ -378,31 +382,50 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
-            # Drain before reporting EXITED / disconnecting: wait until no
-            # background work is in flight, with the pool open and the queue
-            # still consumed, so a doer already running finishes (and can still
-            # notify over the live bus) and a message that arrives meanwhile is
-            # worked, never consumed and dropped. Then stop consuming, so what
-            # arrives next waits in the queue for the successor, and close the
-            # pool. Bounded in practice by each doer's own subprocess timeout.
+            # Stop consuming FIRST, and only then drain, for a bounded time.
+            #
+            # The previous order kept the subscription open across the drain so
+            # a message arriving mid-shutdown would be worked rather than left
+            # queued. That made a stopping agent keep taking new work while it
+            # published nothing, and an unbounded wait on one long doer — a
+            # storage sweep, say — held the whole agent there. On 2026-09-07 a
+            # deploy left the production operations agent draining for twelve
+            # minutes against a systemd stop timeout of 65, accepting a
+            # submission after its SIGTERM and publishing no Snapper capture
+            # meanwhile. An operations agent must not be able to wedge: what
+            # arrives during a shutdown belongs to the successor, and the
+            # shutdown must end whatever a doer is doing.
+            try:
+                if self.mq_connected:
+                    self.conn.unsubscribe(id=1)
+                    logging.info("Stopped consuming; queued work waits for the successor")
+            except Exception as e:
+                logging.warning(f"Unsubscribe before drain failed: {e}")
             if self._bg_executor is not None:
-                logging.info("Draining background work...")
+                logging.info(
+                    f"Draining background work, up to {self._drain_limit_s}s...")
+                started = time.monotonic()
                 last_report = 0.0
                 while True:
                     with self._bg_lock:
                         inflight = self._bg_inflight
                     if inflight == 0:
                         break
+                    waited = time.monotonic() - started
+                    if waited >= self._drain_limit_s:
+                        # The doer keeps running as a child process and is
+                        # killed with the unit; what it was doing is re-run by
+                        # its own schedule. A late exit costs more than a lost
+                        # pass.
+                        logging.warning(
+                            f"Drain limit reached after {int(waited)}s with "
+                            f"{inflight} task(s) still in flight; exiting anyway")
+                        break
                     if time.monotonic() - last_report >= 30:
                         logging.info(f"Draining: {inflight} background task(s) in flight")
                         last_report = time.monotonic()
                     time.sleep(1)
-                try:
-                    if self.mq_connected:
-                        self.conn.unsubscribe(id=1)
-                except Exception as e:
-                    logging.warning(f"Unsubscribe before exit failed: {e}")
-                self._bg_executor.shutdown(wait=True)
+                self._bg_executor.shutdown(wait=False)
 
             # Report exit status before disconnecting
             try:
