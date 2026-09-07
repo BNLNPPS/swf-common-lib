@@ -214,10 +214,17 @@ class BaseAgent(stomp.ConnectionListener):
         self._bg_inflight = 0                # background tasks currently running
         self._bg_keys: set[str] = set()      # in-flight dedup keys
         self._stopping = False               # a stop signal was received; draining
-        # How long a shutdown waits for work already running before it exits
-        # anyway. An operations agent that cannot be stopped promptly is a
-        # wedged agent, and a deploy must cost seconds, not a doer's runtime.
+        self._stop_now = False               # a second stop signal: end work now
+        # A deliberate shutdown (a subclass sets this before stopping) exits
+        # with EXIT_DELIBERATE so a unit declaring it as RestartPreventExitStatus
+        # stays down; any other exit is restarted.
+        self._deliberate = False
+        # How long a shutdown waits for work already running before it ends
+        # that work itself, and how long it gives a doer process to die. An
+        # operations agent that cannot be stopped promptly is a wedged agent,
+        # and a deploy must cost seconds, not a doer's runtime.
         self._drain_limit_s = int(os.getenv('SWF_AGENT_DRAIN_LIMIT_S', '60'))
+        self._stop_grace_s = int(os.getenv('SWF_AGENT_STOP_GRACE_S', '5'))
         self._send_lock = threading.Lock()   # serialize bus sends across threads
 
         # Use HTTP URL for REST logging (no auth required)
@@ -300,9 +307,10 @@ class BaseAgent(stomp.ConnectionListener):
         def signal_handler(signum, frame):
             sig_name = signal.Signals(signum).name
             if self._stopping:
-                # A second stop signal during the drain changes nothing: the
-                # work in flight finishes first, then the agent exits.
-                logging.info(f"Received {sig_name} while draining; finishing work in flight first")
+                # A second stop signal during the drain cuts it short: the
+                # work in flight is ended now rather than at the drain limit.
+                self._stop_now = True
+                logging.warning(f"Received {sig_name} while draining; ending work in flight now")
                 return
             self._stopping = True
             logging.info(f"Received {sig_name}, initiating graceful shutdown...")
@@ -382,62 +390,167 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
-            # Stop consuming FIRST, and only then drain, for a bounded time.
-            #
-            # The previous order kept the subscription open across the drain so
-            # a message arriving mid-shutdown would be worked rather than left
-            # queued. That made a stopping agent keep taking new work while it
-            # published nothing, and an unbounded wait on one long doer — a
-            # storage sweep, say — held the whole agent there. On 2026-09-07 a
-            # deploy left the production operations agent draining for twelve
-            # minutes against a systemd stop timeout of 65, accepting a
-            # submission after its SIGTERM and publishing no Snapper capture
-            # meanwhile. An operations agent must not be able to wedge: what
-            # arrives during a shutdown belongs to the successor, and the
-            # shutdown must end whatever a doer is doing.
-            try:
-                if self.mq_connected:
-                    self.conn.unsubscribe(id=1)
-                    logging.info("Stopped consuming; queued work waits for the successor")
-            except Exception as e:
-                logging.warning(f"Unsubscribe before drain failed: {e}")
-            if self._bg_executor is not None:
-                logging.info(
-                    f"Draining background work, up to {self._drain_limit_s}s...")
-                started = time.monotonic()
-                last_report = 0.0
-                while True:
+            self._stop_and_drain()
+
+    # ── The stop path ──────────────────────────────────────────────────────
+    #
+    # A stop is bounded end to end, whatever a doer is doing. In order: stop
+    # consuming, so what arrives during the stop waits in the queue for the
+    # successor; wait for work in flight up to the drain limit; end the doer
+    # processes that are still running, so their threads return and record
+    # their own outcomes; report EXITED and release the bus. A hard-exit
+    # guard armed at the start ends the process at a fixed limit if any step
+    # blocks — a doer that ignores signals, a bus or monitor call that hangs,
+    # or the pool join Python performs at interpreter exit (concurrent.futures
+    # registers an atexit hook that joins every worker thread, so a worker
+    # blocked in subprocess.run would otherwise hold the exit for the doer's
+    # whole timeout). systemd restarts the unit and, under KillMode=mixed,
+    # kills whatever the doers left in the control group.
+    #
+    # Why: on 2026-09-07 a deploy signalled the production operations agent
+    # during a storage sweep. The drain of the day waited without bound with
+    # the queue still consumed: the agent accepted a submission after its
+    # SIGTERM, published nothing for twelve minutes, and would have held the
+    # sweep's full hour but for a hand kill. The stop had no bound at all
+    # because the deploy signalled the process directly, outside a systemd
+    # stop job. An operations agent must not be able to wedge.
+
+    EXIT_DELIBERATE = 100
+
+    def _exit_code(self):
+        return self.EXIT_DELIBERATE if self._deliberate else 0
+
+    def _stop_and_drain(self):
+        """Stop consuming, drain for a bounded time, end what remains, report
+        EXITED, release the bus. Returns when the process may exit."""
+        hard_limit = self._drain_limit_s + 3 * self._stop_grace_s + 30
+        code = self._exit_code()
+
+        def _hard_exit():
+            logging.error(
+                f"Stop did not complete within {hard_limit}s; hard exit ({code})")
+            os._exit(code)
+
+        guard = threading.Timer(hard_limit, _hard_exit)
+        guard.daemon = True
+        guard.start()
+
+        try:
+            if self.mq_connected:
+                self.conn.unsubscribe(id=1)
+                logging.info("Stopped consuming; queued work waits for the successor")
+        except Exception as e:
+            logging.warning(f"Unsubscribe before drain failed: {e}")
+
+        if self._bg_executor is not None:
+            logging.info(f"Draining background work, up to {self._drain_limit_s}s...")
+            if not self._wait_inflight(self._drain_limit_s):
+                self._end_children()
+                # The freed threads record their doers' outcomes on their own
+                # error paths; give them the grace period to do so.
+                if not self._wait_inflight(self._stop_grace_s, stop_now=False):
                     with self._bg_lock:
                         inflight = self._bg_inflight
-                    if inflight == 0:
-                        break
-                    waited = time.monotonic() - started
-                    if waited >= self._drain_limit_s:
-                        # The doer keeps running as a child process and is
-                        # killed with the unit; what it was doing is re-run by
-                        # its own schedule. A late exit costs more than a lost
-                        # pass.
-                        logging.warning(
-                            f"Drain limit reached after {int(waited)}s with "
-                            f"{inflight} task(s) still in flight; exiting anyway")
-                        break
-                    if time.monotonic() - last_report >= 30:
-                        logging.info(f"Draining: {inflight} background task(s) in flight")
-                        last_report = time.monotonic()
-                    time.sleep(1)
-                self._bg_executor.shutdown(wait=False)
+                    logging.error(
+                        f"{inflight} background task(s) still in flight after their "
+                        "processes were ended; exiting without them")
+            self._bg_executor.shutdown(wait=False)
 
-            # Report exit status before disconnecting
-            try:
-                self.operational_state = 'EXITED'
-                self.report_agent_status("EXITED", "Agent shutdown")
-            except Exception as e:
-                logging.warning(f"Failed to report exit status: {e}")
+        try:
+            self.operational_state = 'EXITED'
+            self.report_agent_status("EXITED", "Agent shutdown")
+        except Exception as e:
+            logging.warning(f"Failed to report exit status: {e}")
 
+        try:
             if self.conn and self.conn.is_connected():
                 self.conn.disconnect()
                 self.mq_connected = False
                 logging.info("Disconnected from ActiveMQ.")
+        except Exception as e:
+            logging.warning(f"Disconnect at stop failed: {e}")
+        # The guard stays armed: the interpreter's own exit can still block
+        # on a worker that did not return, and the guard is what ends that.
+
+    def _wait_inflight(self, limit_s, stop_now=True):
+        """Wait up to ``limit_s`` for no background task to be in flight.
+        Returns True when the count reached zero, False at the limit or, when
+        ``stop_now`` applies, at a second stop signal."""
+        started = time.monotonic()
+        last_report = 0.0
+        while True:
+            with self._bg_lock:
+                inflight = self._bg_inflight
+            if inflight == 0:
+                return True
+            waited = time.monotonic() - started
+            if waited >= limit_s:
+                logging.warning(
+                    f"Drain limit reached after {int(waited)}s with {inflight} "
+                    "task(s) still in flight")
+                return False
+            if stop_now and self._stop_now:
+                logging.warning(
+                    f"Second stop signal with {inflight} task(s) in flight; "
+                    "ending them now")
+                return False
+            if time.monotonic() - last_report >= 30:
+                logging.info(f"Draining: {inflight} background task(s) in flight")
+                last_report = time.monotonic()
+            time.sleep(0.5)
+
+    def _child_pids(self):
+        """The live direct children of this process, from /proc."""
+        me = str(os.getpid())
+        pids = []
+        try:
+            entries = os.listdir('/proc')
+        except OSError as e:
+            logging.error(f"Cannot list /proc to find child processes: {e}")
+            return pids
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f'/proc/{entry}/status') as handle:
+                    for line in handle:
+                        if line.startswith('PPid:'):
+                            if line.split()[1] == me:
+                                pids.append(int(entry))
+                            break
+            except OSError:
+                continue            # the process ended under the read
+        return pids
+
+    def _end_children(self):
+        """End the doer processes still running: SIGTERM, a grace period,
+        SIGKILL. Their subprocess.run calls return, so the worker threads
+        finish and the drain completes. Grandchildren a doer spawned end with
+        the control group when the unit restarts."""
+        children = self._child_pids()
+        if not children:
+            return
+        logging.warning(f"Ending {len(children)} child process(es): {children}")
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logging.error(f"SIGTERM to child {pid} failed: {e}")
+        deadline = time.monotonic() + self._stop_grace_s
+        while time.monotonic() < deadline:
+            if not set(self._child_pids()) & set(children):
+                return
+            time.sleep(0.2)
+        for pid in set(self._child_pids()) & set(children):
+            logging.error(f"Child {pid} survived SIGTERM for {self._stop_grace_s}s; SIGKILL")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logging.error(f"SIGKILL to child {pid} failed: {e}")
 
     def on_connected(self, frame):
         """Handle successful connection to ActiveMQ."""

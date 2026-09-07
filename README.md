@@ -193,14 +193,20 @@ a process-global library such as `PrunScript`, not one lock per site. Setting
 mutable state or when the whole operation was designed to be serial.
 
 Control messages (liveness, shutdown) should stay inline on the receiver thread;
-only long-running work is offloaded. A stop signal drains: the agent keeps
-consuming and working until no background task is in flight, then unsubscribes
-(what arrives next waits in the queue for the successor), closes the pool,
-reports EXITED and exits; a second stop signal during the drain changes nothing.
-Run the agent under a unit whose stop signals only the agent process
-(`KillMode=mixed`) with a stop timeout above the longest doer's own, so a stop
-never kills a working doer. See `swf-epicprod/docs/EPICPROD_OPS.md` for the
-first consumer.
+only long-running work is offloaded. A stop is bounded end to end, whatever a
+doer is doing. On the stop signal the agent stops consuming (what arrives next
+waits in the queue for the successor), waits for work in flight up to
+`SWF_AGENT_DRAIN_LIMIT_S` (default 60 s), then ends the doer processes still
+running (SIGTERM, `SWF_AGENT_STOP_GRACE_S` of grace, default 5 s, then SIGKILL)
+so their worker threads return and record their outcomes, reports EXITED and
+releases the bus. A second stop signal during the drain ends the work at once.
+A hard-exit guard armed at the stop ends the process at the drain limit plus
+about 45 s if any step blocks, including the worker-thread join Python performs
+at interpreter exit. Run the agent under a unit with `KillMode=mixed` (a stop
+signals the agent alone; whatever the doers left in the control group is
+killed when the main process exits) and a stop timeout a little above the
+hard-exit limit, so systemd is the last resort and not the first. See
+`swf-epicprod/docs/EPICPROD_OPS.md` for the first consumer.
 
 ## MQ and Rucio Utility packages
 
