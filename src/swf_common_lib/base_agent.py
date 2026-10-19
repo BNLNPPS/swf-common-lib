@@ -216,6 +216,19 @@ class BaseAgent(stomp.ConnectionListener):
         self._bg_inflight = 0                # background tasks currently running (all queues)
         self._bg_keys: set[str] = set()      # in-flight dedup keys
         self._bg_active: dict[str, int] = {}  # queue -> tasks currently executing
+        self._stopping = False               # a stop signal was received; draining
+        self._stop_now = False               # a second stop signal: end work now
+        self._bg_closed = False              # past the drain limit: queued tasks do not start
+        # A deliberate shutdown (a subclass sets this before stopping) exits
+        # with EXIT_DELIBERATE so a unit declaring it as RestartPreventExitStatus
+        # stays down; any other exit is restarted.
+        self._deliberate = False
+        # How long a shutdown waits for work already running before it ends
+        # that work itself, and how long it gives a doer process to die. An
+        # operations agent that cannot be stopped promptly is a wedged agent,
+        # and a deploy must cost seconds, not a doer's runtime.
+        self._drain_limit_s = int(os.getenv('SWF_AGENT_DRAIN_LIMIT_S', '60'))
+        self._stop_grace_s = int(os.getenv('SWF_AGENT_STOP_GRACE_S', '5'))
         self._send_lock = threading.Lock()   # serialize bus sends across threads
 
         # Use HTTP URL for REST logging (no auth required)
@@ -234,33 +247,8 @@ class BaseAgent(stomp.ConnectionListener):
         # Set up centralized REST logging
         self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
 
-        # Create connection with proper heartbeat configuration
-        self.conn = stomp.Connection(
-            host_and_ports=[(self.mq_host, self.mq_port)],
-            vhost=self.mq_host,
-            try_loopback_connect=False,
-            heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
-            auto_content_length=False
-        )
-        
-        # Configure SSL if enabled - must be done before set_listener
-        if self.use_ssl:
-            import ssl
-            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
-            
-            if self.ssl_ca_certs:
-                # Configure SSL transport
-                self.conn.transport.set_ssl(
-                    for_hosts=[(self.mq_host, self.mq_port)],
-                    ca_certs=self.ssl_ca_certs,
-                    ssl_version=ssl.PROTOCOL_TLS_CLIENT
-                )
-                logging.info("SSL transport configured successfully")
-            else:
-                logging.warning("SSL enabled but no CA certificate file specified")
-        
-        self.conn.set_listener('', self)
-        
+        self.conn = self._new_connection()
+
         # For localhost development, disable SSL verification and proxy
         if 'localhost' in self.monitor_url or '127.0.0.1' in self.monitor_url:
             self.api.verify = False
@@ -297,6 +285,13 @@ class BaseAgent(stomp.ConnectionListener):
         # Register signal handlers for graceful shutdown
         def signal_handler(signum, frame):
             sig_name = signal.Signals(signum).name
+            if self._stopping:
+                # A second stop signal during the drain cuts it short: the
+                # work in flight is ended now rather than at the drain limit.
+                self._stop_now = True
+                logging.warning(f"Received {sig_name} while draining; ending work in flight now")
+                return
+            self._stopping = True
             logging.info(f"Received {sig_name}, initiating graceful shutdown...")
             raise KeyboardInterrupt(f"Received {sig_name}")
 
@@ -374,25 +369,180 @@ class BaseAgent(stomp.ConnectionListener):
             import traceback
             traceback.print_exc()
         finally:
-            # Drain in-flight background work before reporting EXITED / disconnecting,
-            # so credentialed workers finish (and can still notify over the live bus).
-            # Bounded in practice by each doer's own subprocess timeout.
-            if self._bg_executor:
-                logging.info("Draining background worker pools...")
-                for pool in self._bg_executor.values():
-                    pool.shutdown(wait=True)
+            self._stop_and_drain()
 
-            # Report exit status before disconnecting
+    # ── The stop path ──────────────────────────────────────────────────────
+    #
+    # A stop is bounded end to end, whatever a doer is doing. In order: stop
+    # consuming, so what arrives during the stop waits in the queue for the
+    # successor; wait for work in flight up to the drain limit; end the doer
+    # processes that are still running, so their threads return and record
+    # their own outcomes; report EXITED and release the bus. A hard-exit
+    # guard armed at the start ends the process at a fixed limit if any step
+    # blocks — a doer that ignores signals, a bus or monitor call that hangs,
+    # or the pool join Python performs at interpreter exit (concurrent.futures
+    # registers an atexit hook that joins every worker thread, so a worker
+    # blocked in subprocess.run would otherwise hold the exit for the doer's
+    # whole timeout). systemd restarts the unit and, under KillMode=mixed,
+    # kills whatever the doers left in the control group.
+    #
+    # Why: on 2026-09-07 a deploy signalled the production operations agent
+    # during a storage sweep. The drain of the day waited without bound with
+    # the queue still consumed: the agent accepted a submission after its
+    # SIGTERM, published nothing for twelve minutes, and would have held the
+    # sweep's full hour but for a hand kill. The stop had no bound at all
+    # because the deploy signalled the process directly, outside a systemd
+    # stop job. An operations agent must not be able to wedge.
+
+    EXIT_DELIBERATE = 100
+
+    def _exit_code(self):
+        return self.EXIT_DELIBERATE if self._deliberate else 0
+
+    def _stop_and_drain(self):
+        """Stop consuming, drain for a bounded time, end what remains, report
+        EXITED, release the bus. Returns when the process may exit."""
+        # Every entry into the stop path is a stop, not only a signal: a
+        # reconnect during the drain must not subscribe again.
+        self._stopping = True
+        hard_limit = self._drain_limit_s + 3 * self._stop_grace_s + 30
+        code = self._exit_code()
+
+        def _hard_exit():
+            # Straight to stderr, not through logging: a handler lock held by
+            # a stuck thread would otherwise keep the guard from exiting.
             try:
-                self.operational_state = 'EXITED'
-                self.report_agent_status("EXITED", "Agent shutdown")
-            except Exception as e:
-                logging.warning(f"Failed to report exit status: {e}")
+                os.write(2, f"Stop did not complete within {hard_limit}s; "
+                            f"hard exit ({code})\n".encode())
+            except OSError:
+                pass
+            os._exit(code)
 
+        guard = threading.Timer(hard_limit, _hard_exit)
+        guard.daemon = True
+        guard.start()
+
+        try:
+            if self.mq_connected:
+                self.conn.unsubscribe(id=1)
+                logging.info("Stopped consuming; queued work waits for the successor")
+        except Exception as e:
+            logging.warning(f"Unsubscribe before drain failed: {e}")
+
+        if self._bg_executor:
+            logging.info(f"Draining background work, up to {self._drain_limit_s}s...")
+            if not self._wait_inflight(self._drain_limit_s):
+                # Past the deadline a queued task does not start: its child
+                # would escape _end_children's snapshot and outlive EXITED.
+                with self._bg_lock:
+                    self._bg_closed = True
+                self._end_children()
+                # The freed threads record their doers' outcomes on their own
+                # error paths; give them the grace period to do so.
+                if not self._wait_inflight(self._stop_grace_s, stop_now=False):
+                    with self._bg_lock:
+                        inflight = self._bg_inflight
+                    logging.error(
+                        f"{inflight} background task(s) still in flight after their "
+                        "processes were ended; exiting without them")
+            for pool in self._bg_executor.values():
+                pool.shutdown(wait=False)
+
+        try:
+            self.operational_state = 'EXITED'
+            self.report_agent_status("EXITED", "Agent shutdown")
+        except Exception as e:
+            logging.warning(f"Failed to report exit status: {e}")
+
+        try:
             if self.conn and self.conn.is_connected():
                 self.conn.disconnect()
                 self.mq_connected = False
                 logging.info("Disconnected from ActiveMQ.")
+        except Exception as e:
+            logging.warning(f"Disconnect at stop failed: {e}")
+        # The guard stays armed: the interpreter's own exit can still block
+        # on a worker that did not return, and the guard is what ends that.
+
+    def _wait_inflight(self, limit_s, stop_now=True):
+        """Wait up to ``limit_s`` for no background task to be in flight.
+        Returns True when the count reached zero, False at the limit or, when
+        ``stop_now`` applies, at a second stop signal."""
+        started = time.monotonic()
+        last_report = 0.0
+        while True:
+            with self._bg_lock:
+                inflight = self._bg_inflight
+            if inflight == 0:
+                return True
+            waited = time.monotonic() - started
+            if waited >= limit_s:
+                logging.warning(
+                    f"Drain limit reached after {int(waited)}s with {inflight} "
+                    "task(s) still in flight")
+                return False
+            if stop_now and self._stop_now:
+                logging.warning(
+                    f"Second stop signal with {inflight} task(s) in flight; "
+                    "ending them now")
+                return False
+            if time.monotonic() - last_report >= 30:
+                logging.info(f"Draining: {inflight} background task(s) in flight")
+                last_report = time.monotonic()
+            time.sleep(0.5)
+
+    def _child_pids(self):
+        """The live direct children of this process, from /proc."""
+        me = str(os.getpid())
+        pids = []
+        try:
+            entries = os.listdir('/proc')
+        except OSError as e:
+            logging.error(f"Cannot list /proc to find child processes: {e}")
+            return pids
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f'/proc/{entry}/status') as handle:
+                    for line in handle:
+                        if line.startswith('PPid:'):
+                            if line.split()[1] == me:
+                                pids.append(int(entry))
+                            break
+            except OSError:
+                continue            # the process ended under the read
+        return pids
+
+    def _end_children(self):
+        """End the doer processes still running: SIGTERM, a grace period,
+        SIGKILL. Their subprocess.run calls return, so the worker threads
+        finish and the drain completes. Grandchildren a doer spawned end with
+        the control group when the unit restarts."""
+        children = self._child_pids()
+        if not children:
+            return
+        logging.warning(f"Ending {len(children)} child process(es): {children}")
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logging.error(f"SIGTERM to child {pid} failed: {e}")
+        deadline = time.monotonic() + self._stop_grace_s
+        while time.monotonic() < deadline:
+            if not set(self._child_pids()) & set(children):
+                return
+            time.sleep(0.2)
+        for pid in set(self._child_pids()) & set(children):
+            logging.error(f"Child {pid} survived SIGTERM for {self._stop_grace_s}s; SIGKILL")
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as e:
+                logging.error(f"SIGKILL to child {pid} failed: {e}")
 
     def on_connected(self, frame):
         """Handle successful connection to ActiveMQ."""
@@ -413,16 +563,69 @@ class BaseAgent(stomp.ConnectionListener):
         except Exception as e:
             logging.warning(f"Heartbeat failed during disconnect: {e}")
 
+    def _new_connection(self):
+        """Build a STOMP connection with this agent as its listener."""
+        # Create connection with proper heartbeat configuration
+        conn = stomp.Connection(
+            host_and_ports=[(self.mq_host, self.mq_port)],
+            vhost=self.mq_host,
+            try_loopback_connect=False,
+            heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
+            auto_content_length=False,
+            # Bounds connect, the TLS handshake and CONNECTED: without it a
+            # silent broker blocks a (re)connect forever. Twice the heart-beat.
+            timeout=60,
+        )
+
+        # Configure SSL if enabled - must be done before set_listener
+        if self.use_ssl:
+            import ssl
+            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
+
+            if self.ssl_ca_certs:
+                # Configure SSL transport
+                conn.transport.set_ssl(
+                    for_hosts=[(self.mq_host, self.mq_port)],
+                    ca_certs=self.ssl_ca_certs,
+                    ssl_version=ssl.PROTOCOL_TLS_CLIENT
+                )
+                logging.info("SSL transport configured successfully")
+            else:
+                logging.warning("SSL enabled but no CA certificate file specified")
+
+        conn.set_listener('', self)
+        return conn
+
+    def _fresh_connection(self):
+        """Replace self.conn with a new connection before reconnecting.
+
+        Reconnecting the old connection races its exiting receiver thread
+        (bad file descriptor, or a CONNECT that never completes). The old
+        one is detached first so its late disconnect event is not ours.
+        Overrides of _attempt_reconnect call this before connecting.
+        """
+        old = self.conn
+        if old is not None:
+            # Detached already by an earlier attempt: removing again raises
+            # KeyError, which made every later reconnect fail.
+            if old.get_listener('') is not None:
+                old.remove_listener('')
+            try:
+                if old.is_connected():
+                    old.disconnect()
+            except Exception as e:
+                logging.warning(f"Closing old ActiveMQ connection: {e}")
+        self.conn = self._new_connection()
+
     def _attempt_reconnect(self):
         """Attempt to reconnect to ActiveMQ."""
         if self.mq_connected:
             return True
-            
+
         try:
             logging.info("Attempting to reconnect to ActiveMQ...")
-            if self.conn.is_connected():
-                self.conn.disconnect()
-            
+            self._fresh_connection()
+
             self.conn.connect(
                 self.mq_user,
                 self.mq_password,
@@ -434,6 +637,12 @@ class BaseAgent(stomp.ConnectionListener):
                 }
             )
             
+            if self._stopping:
+                # A stopping agent reconnects to publish only; what arrives
+                # now belongs to its successor.
+                self.mq_connected = True
+                logging.info("Reconnected to ActiveMQ to publish only (stopping)")
+                return True
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             self.mq_connected = True
             logging.info("Successfully reconnected to ActiveMQ")
@@ -635,8 +844,14 @@ class BaseAgent(stomp.ConnectionListener):
         in-flight count / PROCESSING state correct on the way out."""
         with self._bg_lock:
             self._bg_active[queue] = self._bg_active.get(queue, 0) + 1
+            closed = self._bg_closed
         try:
-            fn(*args, **kwargs)
+            if closed:
+                self.logger.warning(
+                    f"{self.agent_name} background '{label}' not started: "
+                    "the agent is stopping past its drain limit")
+            else:
+                fn(*args, **kwargs)
         except Exception as e:
             self.logger.error(
                 f"{self.agent_name} background '{label}' raised: {e}", exc_info=True)

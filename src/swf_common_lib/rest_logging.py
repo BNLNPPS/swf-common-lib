@@ -98,7 +98,7 @@ class RestLogHandler(logging.Handler):
                 if not infra_logger.handlers:
                     # If no handlers configured, add a simple console handler
                     console_handler = logging.StreamHandler()
-                    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+                    console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
                     infra_logger.addHandler(console_handler)
                     infra_logger.setLevel(logging.WARNING)
                 
