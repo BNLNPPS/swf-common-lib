@@ -571,7 +571,10 @@ class BaseAgent(stomp.ConnectionListener):
             vhost=self.mq_host,
             try_loopback_connect=False,
             heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
-            auto_content_length=False
+            auto_content_length=False,
+            # Bounds connect, the TLS handshake and CONNECTED: without it a
+            # silent broker blocks a (re)connect forever. Twice the heart-beat.
+            timeout=60,
         )
 
         # Configure SSL if enabled - must be done before set_listener
@@ -602,12 +605,16 @@ class BaseAgent(stomp.ConnectionListener):
         Overrides of _attempt_reconnect call this before connecting.
         """
         old = self.conn
-        old.remove_listener('')
-        try:
-            if old.is_connected():
-                old.disconnect()
-        except Exception as e:
-            logging.warning(f"Closing old ActiveMQ connection: {e}")
+        if old is not None:
+            # Detached already by an earlier attempt: removing again raises
+            # KeyError, which made every later reconnect fail.
+            if old.get_listener('') is not None:
+                old.remove_listener('')
+            try:
+                if old.is_connected():
+                    old.disconnect()
+            except Exception as e:
+                logging.warning(f"Closing old ActiveMQ connection: {e}")
         self.conn = self._new_connection()
 
     def _attempt_reconnect(self):
