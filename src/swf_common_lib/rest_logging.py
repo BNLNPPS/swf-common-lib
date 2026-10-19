@@ -98,7 +98,7 @@ class RestLogHandler(logging.Handler):
                 if not infra_logger.handlers:
                     # If no handlers configured, add a simple console handler
                     console_handler = logging.StreamHandler()
-                    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+                    console_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s'))
                     infra_logger.addHandler(console_handler)
                     infra_logger.setLevel(logging.WARNING)
                 
@@ -147,7 +147,7 @@ def setup_rest_logging(app_name, instance_name, base_url=None, timeout=10):
     # Create console fallback handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(levelname)s: %(message)s')
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
     console_handler.setFormatter(formatter)
     
     # Add REST handler with fallback capability
