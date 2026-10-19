@@ -33,8 +33,6 @@ def extract_scope(dataset_name: str, strip_slash: bool = False):
     - Explicit colon format: scope:name (e.g., "user.pilot:dataset.name")
     - Inferred dot format:   scope.name (e.g., "user.pilot.dataset.name")
 
-    Based on the extract_scope method in rucio_comms/utils.py (RucioUtils).
-
     Args:
         dataset_name: Dataset name in either format.
         strip_slash:  Whether to strip a trailing slash.

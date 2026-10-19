@@ -207,9 +207,3 @@ signals the agent alone; whatever the doers left in the control group is
 killed when the main process exits) and a stop timeout a little above the
 hard-exit limit, so systemd is the last resort and not the first. See
 `swf-epicprod/docs/EPICPROD_OPS.md` for the first consumer.
-
-## MQ and Rucio Utility packages
-
-The *mq_comms* and *rucio_comms* packages provide convenient encapsulation of interactions
-with the ActiveMQ and Rucio systems, respectively. Each folder contains it's own README file
-with more details.
