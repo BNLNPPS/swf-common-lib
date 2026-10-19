@@ -218,6 +218,7 @@ class BaseAgent(stomp.ConnectionListener):
         self._bg_active: dict[str, int] = {}  # queue -> tasks currently executing
         self._stopping = False               # a stop signal was received; draining
         self._stop_now = False               # a second stop signal: end work now
+        self._bg_closed = False              # past the drain limit: queued tasks do not start
         # A deliberate shutdown (a subclass sets this before stopping) exits
         # with EXIT_DELIBERATE so a unit declaring it as RestartPreventExitStatus
         # stays down; any other exit is restarted.
@@ -401,12 +402,20 @@ class BaseAgent(stomp.ConnectionListener):
     def _stop_and_drain(self):
         """Stop consuming, drain for a bounded time, end what remains, report
         EXITED, release the bus. Returns when the process may exit."""
+        # Every entry into the stop path is a stop, not only a signal: a
+        # reconnect during the drain must not subscribe again.
+        self._stopping = True
         hard_limit = self._drain_limit_s + 3 * self._stop_grace_s + 30
         code = self._exit_code()
 
         def _hard_exit():
-            logging.error(
-                f"Stop did not complete within {hard_limit}s; hard exit ({code})")
+            # Straight to stderr, not through logging: a handler lock held by
+            # a stuck thread would otherwise keep the guard from exiting.
+            try:
+                os.write(2, f"Stop did not complete within {hard_limit}s; "
+                            f"hard exit ({code})\n".encode())
+            except OSError:
+                pass
             os._exit(code)
 
         guard = threading.Timer(hard_limit, _hard_exit)
@@ -423,6 +432,10 @@ class BaseAgent(stomp.ConnectionListener):
         if self._bg_executor:
             logging.info(f"Draining background work, up to {self._drain_limit_s}s...")
             if not self._wait_inflight(self._drain_limit_s):
+                # Past the deadline a queued task does not start: its child
+                # would escape _end_children's snapshot and outlive EXITED.
+                with self._bg_lock:
+                    self._bg_closed = True
                 self._end_children()
                 # The freed threads record their doers' outcomes on their own
                 # error paths; give them the grace period to do so.
@@ -617,6 +630,12 @@ class BaseAgent(stomp.ConnectionListener):
                 }
             )
             
+            if self._stopping:
+                # A stopping agent reconnects to publish only; what arrives
+                # now belongs to its successor.
+                self.mq_connected = True
+                logging.info("Reconnected to ActiveMQ to publish only (stopping)")
+                return True
             self.conn.subscribe(destination=self.subscription_queue, id=1, ack='auto')
             self.mq_connected = True
             logging.info("Successfully reconnected to ActiveMQ")
@@ -818,8 +837,14 @@ class BaseAgent(stomp.ConnectionListener):
         in-flight count / PROCESSING state correct on the way out."""
         with self._bg_lock:
             self._bg_active[queue] = self._bg_active.get(queue, 0) + 1
+            closed = self._bg_closed
         try:
-            fn(*args, **kwargs)
+            if closed:
+                self.logger.warning(
+                    f"{self.agent_name} background '{label}' not started: "
+                    "the agent is stopping past its drain limit")
+            else:
+                fn(*args, **kwargs)
         except Exception as e:
             self.logger.error(
                 f"{self.agent_name} background '{label}' raised: {e}", exc_info=True)
