@@ -243,33 +243,8 @@ class BaseAgent(stomp.ConnectionListener):
         # Set up centralized REST logging
         self.logger = setup_rest_logging('base_agent', self.agent_name, self.base_url)
 
-        # Create connection with proper heartbeat configuration
-        self.conn = stomp.Connection(
-            host_and_ports=[(self.mq_host, self.mq_port)],
-            vhost=self.mq_host,
-            try_loopback_connect=False,
-            heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
-            auto_content_length=False
-        )
-        
-        # Configure SSL if enabled - must be done before set_listener
-        if self.use_ssl:
-            import ssl
-            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
-            
-            if self.ssl_ca_certs:
-                # Configure SSL transport
-                self.conn.transport.set_ssl(
-                    for_hosts=[(self.mq_host, self.mq_port)],
-                    ca_certs=self.ssl_ca_certs,
-                    ssl_version=ssl.PROTOCOL_TLS_CLIENT
-                )
-                logging.info("SSL transport configured successfully")
-            else:
-                logging.warning("SSL enabled but no CA certificate file specified")
-        
-        self.conn.set_listener('', self)
-        
+        self.conn = self._new_connection()
+
         # For localhost development, disable SSL verification and proxy
         if 'localhost' in self.monitor_url or '127.0.0.1' in self.monitor_url:
             self.api.verify = False
@@ -571,16 +546,62 @@ class BaseAgent(stomp.ConnectionListener):
         except Exception as e:
             logging.warning(f"Heartbeat failed during disconnect: {e}")
 
+    def _new_connection(self):
+        """Build a STOMP connection with this agent as its listener."""
+        # Create connection with proper heartbeat configuration
+        conn = stomp.Connection(
+            host_and_ports=[(self.mq_host, self.mq_port)],
+            vhost=self.mq_host,
+            try_loopback_connect=False,
+            heartbeats=(30000, 30000),  # Enable automatic heartbeat sending
+            auto_content_length=False
+        )
+
+        # Configure SSL if enabled - must be done before set_listener
+        if self.use_ssl:
+            import ssl
+            logging.info(f"Configuring SSL connection with CA certs: {self.ssl_ca_certs}")
+
+            if self.ssl_ca_certs:
+                # Configure SSL transport
+                conn.transport.set_ssl(
+                    for_hosts=[(self.mq_host, self.mq_port)],
+                    ca_certs=self.ssl_ca_certs,
+                    ssl_version=ssl.PROTOCOL_TLS_CLIENT
+                )
+                logging.info("SSL transport configured successfully")
+            else:
+                logging.warning("SSL enabled but no CA certificate file specified")
+
+        conn.set_listener('', self)
+        return conn
+
+    def _fresh_connection(self):
+        """Replace self.conn with a new connection before reconnecting.
+
+        Reconnecting the old connection races its exiting receiver thread
+        (bad file descriptor, or a CONNECT that never completes). The old
+        one is detached first so its late disconnect event is not ours.
+        Overrides of _attempt_reconnect call this before connecting.
+        """
+        old = self.conn
+        old.remove_listener('')
+        try:
+            if old.is_connected():
+                old.disconnect()
+        except Exception as e:
+            logging.warning(f"Closing old ActiveMQ connection: {e}")
+        self.conn = self._new_connection()
+
     def _attempt_reconnect(self):
         """Attempt to reconnect to ActiveMQ."""
         if self.mq_connected:
             return True
-            
+
         try:
             logging.info("Attempting to reconnect to ActiveMQ...")
-            if self.conn.is_connected():
-                self.conn.disconnect()
-            
+            self._fresh_connection()
+
             self.conn.connect(
                 self.mq_user,
                 self.mq_password,
