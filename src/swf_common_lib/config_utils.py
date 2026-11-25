@@ -4,8 +4,18 @@ Testbed configuration utilities.
 Provides loading and validation of testbed instance configuration (testbed.toml).
 """
 
+import getpass
 import tomllib
 from pathlib import Path
+
+
+def testbed_namespace(config: dict) -> str:
+    """The namespace a testbed configuration names: its [testbed]
+    namespace, or the user's own login name when that is unset or empty.
+    A user who starts without a configuration of their own therefore works
+    in their own namespace, never in another user's. Every reader of the
+    namespace goes through this function."""
+    return ((config or {}).get('testbed') or {}).get('namespace') or getpass.getuser()
 
 
 class TestbedConfigError(Exception):
@@ -25,7 +35,7 @@ class TestbedConfig:
         Initialize with validated namespace.
 
         Args:
-            namespace: The testbed namespace (must not be empty)
+            namespace: The testbed namespace
         """
         self.namespace = namespace
 
@@ -41,7 +51,7 @@ class TestbedConfig:
             TestbedConfig instance
 
         Raises:
-            TestbedConfigError: If config file not found, invalid, or namespace empty
+            TestbedConfigError: If config file not found or invalid
         """
         config_file = Path(config_path)
 
@@ -59,28 +69,7 @@ class TestbedConfig:
         except tomllib.TOMLDecodeError as e:
             raise TestbedConfigError(f"Invalid TOML in {config_file}: {e}")
 
-        # Extract testbed section
-        testbed_section = config_data.get('testbed')
-        if not testbed_section:
-            raise TestbedConfigError(
-                f"Missing [testbed] section in {config_file}"
-            )
-
-        # Extract and validate namespace
-        namespace = testbed_section.get('namespace')
-        if namespace is None:
-            raise TestbedConfigError(
-                f"Missing 'namespace' in [testbed] section of {config_file}"
-            )
-
-        if namespace == '':
-            raise TestbedConfigError(
-                f"Namespace not configured in {config_file}\n"
-                f"Edit the file and set namespace to your testbed instance name.\n"
-                f"Examples: 'epic-fastmon-dev', 'collab-dec29', 'mytest1'"
-            )
-
-        return cls(namespace=namespace)
+        return cls(namespace=testbed_namespace(config_data))
 
     def __repr__(self) -> str:
         return f"TestbedConfig(namespace='{self.namespace}')"
@@ -97,6 +86,6 @@ def load_testbed_config(config_path: str) -> TestbedConfig:
         TestbedConfig instance
 
     Raises:
-        TestbedConfigError: If config is missing, invalid, or namespace empty
+        TestbedConfigError: If config is missing or invalid
     """
     return TestbedConfig.load(config_path=config_path)
